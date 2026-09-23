@@ -1,0 +1,20 @@
+services:
+  # Backend API Web Service on Render
+  - type: web
+    name: flight-tracker-backend
+    env: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: FLIGHT_API_KEY
+        sync: false
+      - key: FLIGHT_API_BASE_URL
+        value: https://api.aviationstack.com/v1
+      - key: CORS_ORIGIN
+        value: '*'
