@@ -1,6 +1,6 @@
 import { ApiResponse, Flight, FlightSearchFilters } from '../types/flight';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 export class FlightApiClient {
   /**
@@ -22,7 +22,7 @@ export class FlightApiClient {
       if (filters.flightDate) params.append('flightDate', filters.flightDate);
     }
 
-    const endpoint = `${BASE_URL}/flights/search?${params.toString()}`;
+const endpoint = `${BASE_URL}/api/flights/search?${params.toString()}`;
 
     try {
       const response = await fetch(endpoint, {
@@ -65,7 +65,7 @@ export class FlightApiClient {
     if (date) params.append('flightDate', date);
 
     const query = params.toString() ? `?${params.toString()}` : '';
-    const endpoint = `${BASE_URL}/flights/${encodeURIComponent(flightNumber.trim().toUpperCase())}${query}`;
+const endpoint = `${BASE_URL}/api/flights/${encodeURIComponent(flightNumber.trim().toUpperCase())}${query}`;
 
     try {
       const response = await fetch(endpoint, {
