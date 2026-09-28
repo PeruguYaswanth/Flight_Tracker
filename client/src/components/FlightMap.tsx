@@ -20,8 +20,33 @@ function isValidCoordinate(lat: unknown, lng: unknown): boolean {
     typeof lng === 'number' &&
     Number.isFinite(lat) &&
     Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180 &&
     !(lat === 0 && lng === 0)
   );
+}
+
+/** Airports (and the live fix, if any) the view should frame. */
+function framePoints(flight: Flight): L.LatLng[] {
+  const points: L.LatLng[] = [];
+  if (isValidCoordinate(flight.departure.latitude, flight.departure.longitude)) {
+    points.push(L.latLng(flight.departure.latitude as number, flight.departure.longitude as number));
+  }
+  if (isValidCoordinate(flight.arrival.latitude, flight.arrival.longitude)) {
+    points.push(L.latLng(flight.arrival.latitude as number, flight.arrival.longitude as number));
+  }
+  if (flight.live && isValidCoordinate(flight.live.latitude, flight.live.longitude)) {
+    points.push(L.latLng(flight.live.latitude, flight.live.longitude));
+  }
+  return points;
+}
+
+const FIT_OPTIONS: L.FitBoundsOptions = { padding: [60, 60], maxZoom: 7 };
+
+function formatOrNA(value: number | null | undefined, format: (v: number) => string): string {
+  return typeof value === 'number' && Number.isFinite(value) ? format(value) : 'N/A';
 }
 
 export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavailableMessage }) => {
@@ -29,7 +54,14 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
   const aircraftMarkerRef = useRef<L.Marker | null>(null);
+  // The view is framed once per flight, so data refreshes never reset the
+  // user's zoom/pan.
+  const framedFlightRef = useRef<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
+
+  // Route geometry as a value, so a refresh that returns an equal route
+  // (new array, same points) doesn't redraw it.
+  const routeKey = selectedFlight?.route ? JSON.stringify(selectedFlight.route) : '';
 
   // Initialize Leaflet Map once
   useEffect(() => {
@@ -82,6 +114,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       mapInstanceRef.current = null;
       layerGroupRef.current = null;
       aircraftMarkerRef.current = null;
+      framedFlightRef.current = null;
       setMapReady(false);
     };
   }, []);
@@ -98,13 +131,11 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       return;
     }
 
-    const { departure, arrival, route, live } = selectedFlight;
-    const boundsPoints: L.LatLngExpression[] = [];
+    const { departure, arrival, route } = selectedFlight;
 
     // 1. Departure Airport Marker
     if (isValidCoordinate(departure.latitude, departure.longitude)) {
       const depLatLng = L.latLng(departure.latitude as number, departure.longitude as number);
-      boundsPoints.push(depLatLng);
 
       const depIcon = L.divIcon({
         className: 'custom-dep-pin',
@@ -132,7 +163,6 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
     // 2. Arrival Airport Marker
     if (isValidCoordinate(arrival.latitude, arrival.longitude)) {
       const arrLatLng = L.latLng(arrival.latitude as number, arrival.longitude as number);
-      boundsPoints.push(arrLatLng);
 
       const arrIcon = L.divIcon({
         className: 'custom-arr-pin',
@@ -170,25 +200,24 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       layerGroup.addLayer(polyline);
     }
 
-    if (live && isValidCoordinate(live.latitude, live.longitude)) {
-      boundsPoints.push(L.latLng(live.latitude, live.longitude));
+    // Frame the route (and the aircraft, if already known) once per flight.
+    if (framedFlightRef.current !== selectedFlight.id) {
+      const points = framePoints(selectedFlight);
+      if (points.length > 0) {
+        map.fitBounds(L.latLngBounds(points), { ...FIT_OPTIONS, animate: true });
+        framedFlightRef.current = selectedFlight.id;
+      }
     }
-
-    if (boundsPoints.length > 0) {
-      const bounds = L.latLngBounds(boundsPoints);
-      map.fitBounds(bounds, {
-        padding: [60, 60],
-        maxZoom: 7,
-        animate: true,
-      });
-    }
+    // The aircraft marker is deliberately not in this layer group, so
+    // redrawing the route never removes it.
   }, [
-    selectedFlight?.flightNumber,
+    selectedFlight?.id,
     selectedFlight?.departure.latitude,
     selectedFlight?.departure.longitude,
     selectedFlight?.arrival.latitude,
     selectedFlight?.arrival.longitude,
-    selectedFlight?.route,
+    selectedFlight?.hasLiveTracking,
+    routeKey,
     mapReady,
   ]);
 
@@ -208,17 +237,26 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
     }
 
     const planeLatLng = L.latLng(live.latitude, live.longitude);
-    const heading = live.heading ?? 0;
+    const hasHeading = typeof live.heading === 'number' && Number.isFinite(live.heading);
+
+    // The plane glyph is drawn nose-up-right (45deg), so it is turned by
+    // heading - 45 to point along the real track. Without a reported
+    // heading, a non-directional dot is shown rather than an assumed one.
+    const glyph = hasHeading
+      ? `<div style="transform: rotate(${(live.heading as number) - 45}deg); transition: transform 0.5s ease-out; display: flex;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="#ffffff" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
+            </svg>
+          </div>`
+      : `<div style="width: 12px; height: 12px; border-radius: 9999px; background: #ffffff;"></div>`;
 
     const aircraftIcon = L.divIcon({
       className: 'custom-aircraft-marker',
       html: `
-        <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;">
+        <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;" data-heading="${hasHeading ? live.heading : 'none'}">
           <div style="position: absolute; width: 44px; height: 44px; border-radius: 9999px; background: rgba(56, 189, 248, 0.25); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-          <div style="transform: rotate(${heading}deg); transition: transform 0.5s ease-out; width: 38px; height: 38px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 9999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(56, 189, 248, 0.7);">
-            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="#ffffff" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
-            </svg>
+          <div style="width: 38px; height: 38px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 9999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(56, 189, 248, 0.7);">
+            ${glyph}
           </div>
         </div>
       `,
@@ -226,15 +264,20 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       iconAnchor: [24, 24],
     });
 
-    // Only fields the provider actually returned are shown.
-    const rows: Array<[string, string]> = [];
-    if (typeof live.altitude === 'number') rows.push(['Altitude', `${live.altitude.toLocaleString()} ft`]);
-    if (typeof live.speed === 'number') rows.push(['Speed', `${live.speed} km/h`]);
-    if (typeof live.heading === 'number') rows.push(['Heading', `${live.heading}°`]);
-    rows.push(['Status', live.isGround ? 'On Ground' : 'Airborne']);
+    // Provider values only; anything not reported shows as N/A.
+    const rows: Array<[string, string]> = [
+      ['Flight', selectedFlight?.flightNumber ?? 'N/A'],
+      ['Callsign', live.callsign || 'N/A'],
+      ['ICAO24', live.icao24 || 'N/A'],
+      ['Latitude', live.latitude.toFixed(6)],
+      ['Longitude', live.longitude.toFixed(6)],
+      ['Altitude', formatOrNA(live.altitude, (v) => `${v.toLocaleString()} ft`)],
+      ['Speed', formatOrNA(live.speed, (v) => `${v} km/h`)],
+      ['Heading', formatOrNA(live.heading, (v) => `${v}°`)],
+      ['Source', live.source === 'airlabs' ? 'AirLabs' : live.source === 'opensky' ? 'OpenSky' : 'N/A'],
+    ];
     const ageSeconds = live.updatedAt ? Math.max(0, Math.round((Date.now() - new Date(live.updatedAt).getTime()) / 1000)) : null;
-    const sourceLabel = live.source === 'airlabs' ? 'AirLabs ADS-B' : live.source === 'opensky' ? 'OpenSky Network' : null;
-    const footer = [sourceLabel, ageSeconds !== null ? `updated ${ageSeconds < 60 ? `${ageSeconds}s` : `${Math.round(ageSeconds / 60)} min`} ago` : null]
+    const footer = [ageSeconds !== null ? `updated ${ageSeconds < 60 ? `${ageSeconds}s` : `${Math.round(ageSeconds / 60)} min`} ago` : null]
       .filter(Boolean)
       .join(' · ');
 
@@ -244,22 +287,23 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
           <span>&#9992;</span> ${selectedFlight?.flightNumber ?? ''}
         </div>
         <hr style="border: 0; border-top: 1px solid #334155; margin: 6px 0;" />
-        <div style="color: #94a3b8; font-size: 11px;">Current Coordinates:</div>
-        <div style="color: #f8fafc; font-family: monospace; font-weight: 700; margin-bottom: 4px;">
-          ${live.latitude.toFixed(4)}°, ${live.longitude.toFixed(4)}°
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; margin-top: 4px;">
-          ${rows.map(([k, v]) => `<div><span style="color: #94a3b8;">${k}:</span> <b style="color: ${k === 'Status' ? '#34d399' : '#f8fafc'};">${v}</b></div>`).join('')}
+        <div style="display: grid; grid-template-columns: auto 1fr; column-gap: 10px; row-gap: 2px; font-size: 11px;">
+          ${rows.map(([k, v]) => `<span style="color: #94a3b8;">${k}:</span><b style="color: #f8fafc; font-family: monospace;">${v}</b>`).join('')}
         </div>
         ${footer ? `<div style="color: #64748b; font-size: 10px; margin-top: 6px;">${footer}</div>` : ''}
       </div>
     `;
 
     if (aircraftMarkerRef.current) {
+      // Same marker, moved in place - never a second one.
       aircraftMarkerRef.current.setLatLng(planeLatLng);
       aircraftMarkerRef.current.setIcon(aircraftIcon);
       aircraftMarkerRef.current.setTooltipContent(tooltipHtml);
     } else {
+      // First fix for this flight: make sure it's in view, once.
+      if (selectedFlight && !map.getBounds().contains(planeLatLng)) {
+        map.fitBounds(L.latLngBounds(framePoints(selectedFlight)), { ...FIT_OPTIONS, animate: true });
+      }
       const planeMarker = L.marker(planeLatLng, { icon: aircraftIcon, zIndexOffset: 1000 });
       planeMarker.bindTooltip(tooltipHtml, {
         direction: 'top',
@@ -304,10 +348,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       points.push([selectedFlight.live.latitude, selectedFlight.live.longitude]);
     }
     if (points.length > 0) {
-      mapInstanceRef.current.fitBounds(L.latLngBounds(points), {
-        padding: [60, 60],
-        maxZoom: 7,
-      });
+      mapInstanceRef.current.fitBounds(L.latLngBounds(points), FIT_OPTIONS);
     }
   };
 

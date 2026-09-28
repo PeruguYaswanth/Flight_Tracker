@@ -97,3 +97,47 @@ export interface ApiResponse<T> {
     details?: any;
   };
 }
+
+export type LiveUnavailableReason =
+  | 'NO_IDENTIFIER'
+  | 'NO_MATCH'
+  | 'STALE'
+  | 'ON_GROUND'
+  | 'INVALID_POSITION'
+  | 'AUTH_ERROR'
+  | 'RATE_LIMITED'
+  | 'PROVIDER_ERROR';
+
+/** A real, current aircraft position from a live provider. */
+export interface LiveAircraftPosition {
+  latitude: number;
+  longitude: number;
+  /** Feet; null when the provider didn't report it. */
+  altitude: number | null;
+  /** km/h */
+  speed: number | null;
+  /** Degrees true; null when not reported - never assumed. */
+  heading: number | null;
+  callsign: string | null;
+  icao24: string;
+  /** ISO time of the position fix. */
+  timestamp: string | null;
+  source: 'opensky' | 'airlabs';
+}
+
+/**
+ * The single response shape of GET /api/live-flights/:flightNumber.
+ * `success` is false only when a live provider failed (auth, rate limit,
+ * outage); a flight with no current position is a successful answer with
+ * `live: null` and the reason.
+ */
+export interface LiveFlightResponse {
+  success: boolean;
+  data: {
+    flightNumber: string;
+    hasLiveTracking: boolean;
+    live: LiveAircraftPosition | null;
+    liveUnavailableReason?: LiveUnavailableReason;
+    message?: string;
+  };
+}

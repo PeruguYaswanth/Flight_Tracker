@@ -25,6 +25,10 @@ export const config = {
   // same hex is used - but only from a lookup at most this old, so a cached
   // record is never shown as the current position.
   airLabsPositionMaxAgeMs: parseInt(process.env.AIRLABS_POSITION_MAX_AGE_MS || '120000', 10),
+  // A position fix older than this is not shown as the aircraft's current
+  // location. Airborne ADS-B fixes are normally seconds old; 5 minutes
+  // tolerates sparse receiver coverage without passing off old positions.
+  livePositionMaxAgeSeconds: parseInt(process.env.LIVE_POSITION_MAX_AGE_SECONDS || '300', 10),
   // Flight notifications. A tracked flight is re-checked at most this often,
   // and only when its owner's client polls - the check goes through
   // flightService's existing 10-minute AirLabs cache, so it adds no

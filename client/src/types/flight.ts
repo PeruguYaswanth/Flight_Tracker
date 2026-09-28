@@ -35,6 +35,10 @@ export interface LivePosition {
   updatedAt?: string | null;
   /** Which provider the position came from ('opensky' | 'airlabs'). */
   source?: string | null;
+  /** Callsign the aircraft is broadcasting, when reported. */
+  callsign?: string | null;
+  /** ICAO24 hex of the aircraft actually matched. */
+  icao24?: string | null;
 }
 
 export interface AircraftInfo {

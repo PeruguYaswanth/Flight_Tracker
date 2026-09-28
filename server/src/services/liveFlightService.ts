@@ -4,18 +4,20 @@ import { LivePosition } from '../types/flight';
 
 export interface LiveFlightPosition extends LivePosition {
   flightNumber: string;
-  /** ICAO24 of the OpenSky state vector that was actually matched. */
+  /** ICAO24 of the aircraft that was actually matched. */
   icao24: string;
-  /** Callsign OpenSky reports for that state vector (trimmed), if any. */
+  /** Callsign the provider reports for that aircraft (normalized), if any. */
   callsign: string | null;
+  /** Unix seconds of the position fix itself. */
+  timestamp: number | null;
 }
 
 interface OpenSkyStateVector extends Array<any> {
   0: string; // icao24
   1: string; // callsign (padded with trailing spaces)
   2: string; // origin_country
-  3: number | null; // time_position
-  4: number | null; // last_contact
+  3: number | null; // time_position - last POSITION update
+  4: number | null; // last_contact - last message of any kind
   5: number | null; // longitude
   6: number | null; // latitude
   7: number | null; // baro_altitude (meters)
@@ -25,24 +27,59 @@ interface OpenSkyStateVector extends Array<any> {
   11: number | null; // vertical_rate
 }
 
-export type LiveUnavailableReason =
-  | 'airlabs_icao24_missing'
-  | 'opensky_icao24_not_visible'
-  | 'callsign_not_currently_visible'
-  | 'stale_opensky_position'
-  | 'aircraft_on_ground';
+/**
+ * Why no live position was returned. Provider failures (AUTH_ERROR,
+ * RATE_LIMITED, PROVIDER_ERROR) are kept distinct from a successful query
+ * that simply found nothing (NO_MATCH).
+ */
+export type LiveReason =
+  | 'NO_IDENTIFIER'
+  | 'NO_MATCH'
+  | 'STALE'
+  | 'ON_GROUND'
+  | 'INVALID_POSITION'
+  | 'AUTH_ERROR'
+  | 'RATE_LIMITED'
+  | 'PROVIDER_ERROR';
+
+export const PROVIDER_FAILURE_REASONS: LiveReason[] = ['AUTH_ERROR', 'RATE_LIMITED', 'PROVIDER_ERROR'];
+
+export type LookupMethod = 'ICAO24' | 'CALLSIGN';
+
+export interface LiveLookupDiagnostics {
+  method: LookupMethod | null;
+  /** The hex, or the callsigns tried. */
+  value: string | null;
+  /** OpenSky HTTP status; null when served from cache or never called. */
+  httpStatus: number | null;
+  cached: boolean;
+  matched: boolean;
+  /** False when OAuth credentials exist but the token refresh failed. */
+  authenticated: boolean;
+  positionTime: number | null;
+  ageSeconds: number | null;
+  /** Area searched by the callsign lookup, if bounded. */
+  area: string | null;
+}
 
 export interface LiveResolutionResult {
   position: LiveFlightPosition | null;
-  reason: LiveUnavailableReason | null;
-  strategy: 'frontend_icao24' | 'airlabs_icao24' | 'callsign_fallback';
+  reason: LiveReason | null;
+  diagnostics: LiveLookupDiagnostics;
+}
+
+export interface BoundingBox {
+  lamin: number;
+  lomin: number;
+  lamax: number;
+  lomax: number;
 }
 
 /**
  * Rejects missing/NaN/out-of-range coordinates and the (0,0) "null island"
  * sentinel some providers use for an unknown position.
  */
-function isValidCoordinate(lat: unknown, lng: unknown): boolean {
+export function isValidCoordinate(lat: unknown, lng: unknown): boolean {
   return (
     typeof lat === 'number' &&
     typeof lng === 'number' &&
@@ -61,13 +98,13 @@ function isValidCoordinate(lat: unknown, lng: unknown): boolean {
 // one - falls back to callsign matching instead.
 const ICAO24_PATTERN = /^[0-9a-f]{6}$/;
 
-function normalizeIcao24(raw?: string | null): string | null {
+export function normalizeIcao24(raw?: string | null): string | null {
   if (!raw) return null;
   const cleaned = String(raw).trim().toLowerCase().replace(/\s+/g, '');
   return ICAO24_PATTERN.test(cleaned) ? cleaned : null;
 }
 
-// "UAE527 ", "uae-527" and "UAE 527" all normalize to "UAE527". Exact
+// "IGO6372 ", "igo6372" and "IGO-6372" all normalize to "IGO6372". Exact
 // comparison only - never prefix matching.
 export function normalizeCallsign(raw?: string | null): string {
   return (raw || '').replace(/[\s-]+/g, '').toUpperCase();
@@ -76,91 +113,109 @@ export function normalizeCallsign(raw?: string | null): string {
 const METERS_TO_FEET = 3.28084;
 const MPS_TO_KMH = 3.6;
 
-// A matched OpenSky state older than this is not treated as a genuine
-// live position - showing it would be indistinguishable from a stale/
-// stopped aircraft to the user. OpenSky's own crowdsourced feed can lag a
-// little, so this is generous without being unbounded.
-const MAX_POSITION_AGE_SECONDS = 15 * 60;
-
-export function isFresh(lastContact: number | null): boolean {
-  if (typeof lastContact !== 'number') return false;
-  return Date.now() / 1000 - lastContact <= MAX_POSITION_AGE_SECONDS;
+export function positionAgeSeconds(positionTime: number | null): number | null {
+  return typeof positionTime === 'number' ? Math.max(0, Math.round(Date.now() / 1000 - positionTime)) : null;
 }
 
-function mapStateVectorToPosition(match: OpenSkyStateVector, flightNumber: string): LiveFlightPosition | null {
+/** Position fix no older than LIVE_POSITION_MAX_AGE_SECONDS. */
+export function isFresh(positionTime: number | null): boolean {
+  const age = positionAgeSeconds(positionTime);
+  return age !== null && age <= config.livePositionMaxAgeSeconds;
+}
+
+/**
+ * Turns one matched state vector into a position, or the precise reason
+ * it can't be shown. Freshness is judged on `time_position` (the last
+ * position fix), not `last_contact`, which any message refreshes.
+ */
+function evaluateState(
+  match: OpenSkyStateVector,
+  flightNumber: string
+): { position: LiveFlightPosition | null; reason: LiveReason | null; positionTime: number | null } {
+  const positionTime = typeof match[3] === 'number' ? match[3] : typeof match[4] === 'number' ? match[4] : null;
   const latitude = match[6];
   const longitude = match[5];
-  if (!isValidCoordinate(latitude, longitude)) return null;
+
+  if (!isValidCoordinate(latitude, longitude)) return { position: null, reason: 'INVALID_POSITION', positionTime };
+  if (!isFresh(positionTime)) return { position: null, reason: 'STALE', positionTime };
+  if (match[8] === true) return { position: null, reason: 'ON_GROUND', positionTime };
 
   const baroAltitudeM = match[7];
   const velocityMps = match[9];
   const trueTrack = match[10];
-  const lastContact = match[4];
 
   return {
-    flightNumber,
-    icao24: (match[0] || '').trim().toLowerCase(),
-    callsign: normalizeCallsign(match[1]) || null,
-    latitude: latitude as number,
-    longitude: longitude as number,
-    altitude: typeof baroAltitudeM === 'number' ? Math.round(baroAltitudeM * METERS_TO_FEET) : null,
-    heading: typeof trueTrack === 'number' ? Math.round(trueTrack) : null,
-    speed: typeof velocityMps === 'number' ? Math.round(velocityMps * MPS_TO_KMH) : null,
-    isGround: Boolean(match[8]),
-    updatedAt: typeof lastContact === 'number' ? new Date(lastContact * 1000).toISOString() : null,
+    reason: null,
+    positionTime,
+    position: {
+      flightNumber,
+      icao24: (match[0] || '').trim().toLowerCase(),
+      callsign: normalizeCallsign(match[1]) || null,
+      latitude: latitude as number,
+      longitude: longitude as number,
+      altitude: typeof baroAltitudeM === 'number' ? Math.round(baroAltitudeM * METERS_TO_FEET) : null,
+      heading: typeof trueTrack === 'number' ? Math.round(trueTrack) : null,
+      speed: typeof velocityMps === 'number' ? Math.round(velocityMps * MPS_TO_KMH) : null,
+      isGround: false,
+      updatedAt: positionTime !== null ? new Date(positionTime * 1000).toISOString() : null,
+      timestamp: positionTime,
+    },
   };
 }
 
+class OpenSkyRequestError extends Error {
+  constructor(public reason: LiveReason, public httpStatus: number | null, message: string) {
+    super(message);
+  }
+}
+
 export interface ResolveLivePositionParams {
-  flightIata?: string | null;
-  flightIcao?: string | null;
+  /** Flight number the position is reported under (operating flight). */
+  flightNumber: string;
   icao24?: string | null;
-  registration?: string | null;
-  /**
-   * Exact callsigns to try against OpenSky when no ICAO24 is known, in
-   * priority order. Defaults to [flightIcao, flightIata].
-   */
+  /** Exact callsigns to try when no ICAO24 is known, in priority order. */
   callsignCandidates?: Array<string | null | undefined>;
-  /** How icao24 (if any) was obtained - purely for logging/diagnostics. */
-  icao24Source?: 'frontend_supplied' | 'airlabs_primary' | 'airlabs_codeshare' | null;
+  /** Limits the callsign lookup to the area around the route. */
+  bbox?: BoundingBox | null;
 }
 
 /**
- * Live aircraft position from OpenSky Network - a separate, independent
- * provider from AirLabs, used only for real-time lat/lon/heading/altitude/
- * speed. AirLabs remains the source for flight search, schedule, status,
- * terminal and gate.
+ * Live aircraft position from OpenSky Network, used only for real-time
+ * lat/lon/heading/altitude/speed. AirLabs remains the source for flight
+ * search, schedule, status, terminal and gate.
  *
  * Matching priority:
- *  1. ICAO24/hex (the aircraft's actual unique transponder address) via a
- *     filtered OpenSky request - cheap and authoritative. A valid hex that
- *     OpenSky doesn't currently see is "unavailable", NEVER a trigger to
- *     fall back to guessing by callsign (that could match a different
- *     aircraft).
- *  2. Only when no usable hex is available at all does this fall back to
- *     ICAO callsign / IATA flight number exact matching against the full
- *     `/states/all` snapshot.
- *  Every match (either path) is also checked for freshness - a stale
- *  OpenSky state is reported as unavailable, never displayed as if live.
+ *  1. ICAO24/hex - a filtered one-aircraft request, authoritative. A valid
+ *     hex OpenSky doesn't see is NO_MATCH, never a trigger to guess by
+ *     callsign (that could be a different aircraft).
+ *  2. Without a hex: exact callsign match, within the route's bounding box
+ *     when known (a small download) instead of the whole world.
+ * Every match is checked for valid coordinates, freshness and on-ground.
+ * Provider failures come back as AUTH_ERROR / RATE_LIMITED / PROVIDER_ERROR,
+ * never thrown and never reported as "no match".
  */
 export class LiveFlightService {
   private client: AxiosInstance;
 
-  // Full-snapshot cache, used only by the callsign fallback path.
-  private cachedStates: OpenSkyStateVector[] | null = null;
-  private cacheTimestamp = 0;
-  private inFlightFetch: Promise<OpenSkyStateVector[]> | null = null;
+  // Area/global snapshots for the callsign path, keyed by bounding box.
+  private areaCache = new Map<string, { timestamp: number; states: OpenSkyStateVector[]; httpStatus: number }>();
+  private areaInFlight = new Map<string, Promise<{ states: OpenSkyStateVector[]; httpStatus: number }>>();
 
-  // Per-ICAO24 cache, used by the primary filtered-lookup path.
+  // Per-ICAO24 results (matches and no-matches; provider errors aren't cached).
   private icao24Cache = new Map<string, { timestamp: number; result: LiveResolutionResult }>();
   private icao24InFlight = new Map<string, Promise<LiveResolutionResult>>();
 
-  private readonly cacheTtlMs = 60_000;
+  private readonly icao24CacheTtlMs = 30_000;
+  private readonly areaCacheTtlMs = 60_000;
+
+  // After a 429, OpenSky isn't called again until this time.
+  private rateLimitedUntil = 0;
 
   private authClient: AxiosInstance;
   private accessToken: string | null = null;
   private tokenExpiresAt = 0;
   private inFlightTokenFetch: Promise<string | null> | null = null;
+  private lastTokenFailed = false;
 
   constructor() {
     this.client = axios.create({
@@ -214,298 +269,203 @@ export class LiveFlightService {
         console.log('[LiveFlightService] OpenSky OAuth2 token refresh:', response.status, '| received:', Boolean(token));
       }
 
+      this.lastTokenFailed = !token;
       if (!token) return null;
 
       this.accessToken = token;
       this.tokenExpiresAt = Date.now() + Math.max(expiresInSec - 60, 30) * 1000;
       return token;
     } catch (err: any) {
-      if (config.isDev) {
-        console.log('[LiveFlightService] OpenSky OAuth2 token refresh failed:', err.response?.status, err.message);
-      }
+      // Requests continue anonymously (lower quota); the failure is
+      // reported in every [LIVE] log line as auth=token_failed.
+      this.lastTokenFailed = true;
+      console.log('[LiveFlightService] OpenSky OAuth2 token refresh failed:', err.response?.status ?? 'no response', err.code || '');
       return null;
     }
+  }
+
+  /**
+   * One OpenSky /states/all request, with failures classified. Never
+   * retries on its own.
+   */
+  private async requestStates(params: Record<string, string | number>): Promise<{ states: OpenSkyStateVector[]; httpStatus: number }> {
+    if (Date.now() < this.rateLimitedUntil) {
+      throw new OpenSkyRequestError('RATE_LIMITED', 429, 'OpenSky rate limit back-off in effect');
+    }
+
+    const token = await this.getAccessToken();
+    try {
+      const response = await this.client.get('/states/all', {
+        params,
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      const states: OpenSkyStateVector[] = Array.isArray(response.data?.states) ? response.data.states : [];
+      return { states, httpStatus: response.status };
+    } catch (err: any) {
+      const status: number | null = err.response?.status ?? null;
+      if (status === 401 || status === 403) {
+        // Force a fresh token next time in case this one was revoked.
+        this.accessToken = null;
+        throw new OpenSkyRequestError('AUTH_ERROR', status, 'OpenSky rejected the credentials');
+      }
+      if (status === 429) {
+        const headers = err.response?.headers || {};
+        const retryAfter = Number(headers['x-rate-limit-retry-after-seconds'] ?? headers['retry-after']);
+        const backoffSeconds = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 3600) : 60;
+        this.rateLimitedUntil = Date.now() + backoffSeconds * 1000;
+        throw new OpenSkyRequestError('RATE_LIMITED', status, `OpenSky rate limited, backing off ${backoffSeconds}s`);
+      }
+      throw new OpenSkyRequestError('PROVIDER_ERROR', status, err.code === 'ECONNABORTED' ? 'OpenSky timeout' : err.message);
+    }
+  }
+
+  private baseDiagnostics(method: LookupMethod | null, value: string | null): LiveLookupDiagnostics {
+    return {
+      method,
+      value,
+      httpStatus: null,
+      cached: false,
+      matched: false,
+      authenticated: this.hasOAuthCredentials && !this.lastTokenFailed,
+      positionTime: null,
+      ageSeconds: null,
+      area: null,
+    };
   }
 
   /**
    * Single entry point for resolving a flight's live position.
    */
   public async resolveLivePosition(params: ResolveLivePositionParams): Promise<LiveResolutionResult> {
-    const { flightIata, flightIcao, icao24, icao24Source } = params;
+    const icao24 = normalizeIcao24(params.icao24);
+    if (icao24) return this.getByIcao24(icao24, params.flightNumber);
 
-    if (config.isDev) {
-      console.log('[LiveFlightService] Live resolution started', {
-        flightNumber: flightIata || null,
-        icaoCallsign: flightIcao || null,
-        suppliedIcao24: icao24 || null,
-      });
+    const candidates = Array.from(
+      new Set((params.callsignCandidates || []).map((c) => normalizeCallsign(c)).filter((c) => c.length > 0))
+    );
+    if (candidates.length === 0) {
+      return { position: null, reason: 'NO_IDENTIFIER', diagnostics: this.baseDiagnostics(null, null) };
     }
-
-    const normalizedIcao24 = normalizeIcao24(icao24);
-
-    if (normalizedIcao24) {
-      const strategy = icao24Source === 'frontend_supplied' ? 'frontend_icao24' : 'airlabs_icao24';
-      if (config.isDev) {
-        console.log('[LiveFlightService] Identifier strategy', { strategy });
-      }
-      const result = await this.getByIcao24(normalizedIcao24, flightIata || flightIcao || normalizedIcao24);
-      if (config.isDev && !result.position) {
-        console.log('[LiveFlightService] Live position unavailable', {
-          flightNumber: flightIata || flightIcao || null,
-          reason: result.reason,
-        });
-      }
-      return { ...result, strategy };
-    }
-
-    if (config.isDev) {
-      console.log('[LiveFlightService] Identifier strategy', { strategy: 'callsign_fallback' });
-    }
-
-    const candidates = (params.callsignCandidates?.length ? params.callsignCandidates : [flightIcao, flightIata])
-      .filter((c): c is string => Boolean(c));
-    const result = await this.getByCallsign(candidates, flightIcao || null, flightIata || flightIcao || '');
-    if (config.isDev && !result.position) {
-      console.log('[LiveFlightService] Live position unavailable', {
-        flightNumber: flightIata || flightIcao || null,
-        reason: result.reason,
-      });
-    }
-    return { ...result, strategy: 'callsign_fallback' };
+    return this.getByCallsign(candidates, params.flightNumber, params.bbox ?? null);
   }
 
-  /**
-   * Looks up one aircraft by ICAO24 using OpenSky's `icao24` filter
-   * parameter, avoiding a full `/states/all` download. Cached per-icao24.
-   */
-  private async getByIcao24(icao24: string, flightNumberForResult: string): Promise<LiveResolutionResult> {
+  private async getByIcao24(icao24: string, flightNumber: string): Promise<LiveResolutionResult> {
     const cached = this.icao24Cache.get(icao24);
-    if (cached && Date.now() - cached.timestamp < this.cacheTtlMs) {
-      if (config.isDev) {
-        console.log('[LiveFlightService] Using cached OpenSky icao24 result', {
-          icao24,
-          ageMs: Date.now() - cached.timestamp,
-        });
+    if (cached && Date.now() - cached.timestamp < this.icao24CacheTtlMs) {
+      // Re-check freshness: a cached fix can age out while cached.
+      const { result } = cached;
+      if (result.position && !isFresh(result.position.timestamp)) {
+        return { position: null, reason: 'STALE', diagnostics: { ...result.diagnostics, cached: true, ageSeconds: positionAgeSeconds(result.position.timestamp) } };
       }
-      return cached.result;
+      return { ...result, diagnostics: { ...result.diagnostics, cached: true, ageSeconds: positionAgeSeconds(result.diagnostics.positionTime) } };
     }
 
     const inFlight = this.icao24InFlight.get(icao24);
     if (inFlight) return inFlight;
 
-    const promise = this.fetchByIcao24(icao24, flightNumberForResult)
+    const promise = this.fetchByIcao24(icao24, flightNumber)
       .then((result) => {
-        this.icao24Cache.set(icao24, { timestamp: Date.now(), result });
+        if (!result.reason || !PROVIDER_FAILURE_REASONS.includes(result.reason)) {
+          this.icao24Cache.set(icao24, { timestamp: Date.now(), result });
+        }
         return result;
       })
-      .finally(() => {
-        this.icao24InFlight.delete(icao24);
-      });
+      .finally(() => this.icao24InFlight.delete(icao24));
 
     this.icao24InFlight.set(icao24, promise);
     return promise;
   }
 
-  private async fetchByIcao24(icao24: string, flightNumberForResult: string): Promise<LiveResolutionResult> {
-    const token = await this.getAccessToken();
-
+  private async fetchByIcao24(icao24: string, flightNumber: string): Promise<LiveResolutionResult> {
+    const diagnostics = this.baseDiagnostics('ICAO24', icao24);
+    let states: OpenSkyStateVector[];
     try {
-      const response = await this.client.get('/states/all', {
-        params: { icao24 },
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
-
-      const states: OpenSkyStateVector[] = Array.isArray(response.data?.states) ? response.data.states : [];
-      const match = states.find((s) => (s[0] || '').toLowerCase() === icao24) || null;
-      const coordsValid = Boolean(match) && isValidCoordinate(match?.[6], match?.[5]);
-
-      if (config.isDev) {
-        console.log('[LiveFlight] OpenSky ICAO24 lookup:', icao24);
-        console.log('[LiveFlight] Exact match:', coordsValid ? 'true' : 'false');
-        if (match) {
-          console.log('[LiveFlight] Latitude:', match[6]);
-          console.log('[LiveFlight] Longitude:', match[5]);
-          console.log('[LiveFlight] Last contact:', match[4]);
-          console.log('[LiveFlight] On ground:', match[8]);
-          console.log('[LiveFlight] Callsign:', (match[1] || '').trim());
-          if (match[7] != null) console.log('[LiveFlight] Baro altitude (m):', match[7]);
-          if (match[9] != null) console.log('[LiveFlight] Velocity (m/s):', match[9]);
-          if (match[10] != null) console.log('[LiveFlight] True track (°):', match[10]);
-        }
-      }
-
-      if (!match || !coordsValid) {
-        return { position: null, reason: 'opensky_icao24_not_visible', strategy: 'airlabs_icao24' };
-      }
-
-      if (!isFresh(match[4])) {
-        const ageSeconds = Math.round(Date.now() / 1000 - (match[4] || 0));
-        if (config.isDev) {
-          console.log('[LiveFlight] Fresh: false — stale_opensky_position, age:', ageSeconds, 's');
-        }
-        return { position: null, reason: 'stale_opensky_position', strategy: 'airlabs_icao24' };
-      }
-
-      if (match[8] === true) {
-        if (config.isDev) {
-          console.log('[LiveFlight] Aircraft on ground — not presenting as live airborne position');
-        }
-        return { position: null, reason: 'aircraft_on_ground', strategy: 'airlabs_icao24' };
-      }
-
-      if (config.isDev) {
-        console.log('[LiveFlight] Fresh: true');
-      }
-
-      return { position: mapStateVectorToPosition(match, flightNumberForResult), reason: null, strategy: 'airlabs_icao24' };
-    } catch (err: any) {
-      if (config.isDev) {
-        console.log('[LiveFlightService] Provider request failed (icao24 lookup):', err.response?.status, err.message);
-      }
-      const error: any = new Error('Unable to retrieve live aircraft position.');
-      error.statusCode = 502;
-      error.code = 'LIVE_PROVIDER_ERROR';
-      throw error;
-    }
-  }
-
-  /**
-   * Fallback path: exact (whitespace/case-insensitive, never prefix)
-   * matching of ICAO callsign then IATA flight number against the full
-   * OpenSky snapshot. Only used when no usable ICAO24 is available.
-   */
-  private async getByCallsign(
-    candidates: string[],
-    requestedCallsign: string | null,
-    flightNumberForResult: string
-  ): Promise<LiveResolutionResult> {
-    const normalizedCandidates = Array.from(new Set(candidates.map(normalizeCallsign).filter((c) => c.length > 0)));
-
-    if (normalizedCandidates.length === 0) {
-      return { position: null, reason: 'callsign_not_currently_visible', strategy: 'callsign_fallback' };
-    }
-
-    if (config.isDev) {
-      console.log(`[LiveFlight] OpenSky callsign fallback: ${normalizedCandidates.join(', ')}`);
-    }
-
-    const states = await this.getStates();
-
-    // Exact match only, and the state must carry a real ICAO24 - a state
-    // without one can't be verified as a specific aircraft.
-    const match = states.find((s) => {
-      const callsign = normalizeCallsign(s[1]);
-      return callsign.length > 0 && normalizedCandidates.includes(callsign) && Boolean(normalizeIcao24(s[0]));
-    });
-
-    const matchedCallsign = match ? normalizeCallsign(match[1]) : null;
-
-    if (config.isDev) {
-      console.log(`[LiveFlight] Exact match: ${Boolean(match)}`);
-      if (match) {
-        console.log(`[LiveFlight] Matched callsign: ${matchedCallsign}`);
-        console.log(`[LiveFlight] Latitude: ${match[6]}`);
-        console.log(`[LiveFlight] Longitude: ${match[5]}`);
-        console.log(`[LiveFlight] Last contact: ${match[4]}`);
-        console.log(`[LiveFlight] On ground: ${match[8]}`);
-      }
-    }
-
-    if (!match || !isValidCoordinate(match[6], match[5])) {
-      return { position: null, reason: 'callsign_not_currently_visible', strategy: 'callsign_fallback' };
-    }
-
-    if (!isFresh(match[4])) {
-      const ageSeconds = Math.round(Date.now() / 1000 - (match[4] || 0));
-      if (config.isDev) {
-        console.log(`[LiveFlight] Fresh: false — stale_opensky_position, age: ${ageSeconds}s`);
-      }
-      return { position: null, reason: 'stale_opensky_position', strategy: 'callsign_fallback' };
-    }
-
-    if (match[8] === true) {
-      if (config.isDev) {
-        console.log('[LiveFlight] Aircraft on ground — not presenting as live airborne position');
-      }
-      return { position: null, reason: 'aircraft_on_ground', strategy: 'callsign_fallback' };
-    }
-
-    if (config.isDev) {
-      console.log(`[LiveFlight] Fresh: true`);
-    }
-
-    return {
-      position: mapStateVectorToPosition(match, flightNumberForResult || matchedCallsign || ''),
-      reason: null,
-      strategy: 'callsign_fallback',
-    };
-  }
-
-  /**
-   * Fetches (or reuses a cached copy of) the full OpenSky state-vector
-   * snapshot. Only used by the callsign fallback path.
-   */
-  private async getStates(): Promise<OpenSkyStateVector[]> {
-    const now = Date.now();
-    if (this.cachedStates && now - this.cacheTimestamp < this.cacheTtlMs) {
-      if (config.isDev) {
-        console.log('[LiveFlightService] Using cached OpenSky snapshot', {
-          ageMs: now - this.cacheTimestamp,
-          aircraftCount: this.cachedStates.length,
-        });
-      }
-      return this.cachedStates;
-    }
-
-    if (this.inFlightFetch) {
-      return this.inFlightFetch;
-    }
-
-    this.inFlightFetch = this.fetchStates();
-    try {
-      const states = await this.inFlightFetch;
-      this.cachedStates = states;
-      this.cacheTimestamp = Date.now();
-      return states;
+      const response = await this.requestStates({ icao24 });
+      states = response.states;
+      diagnostics.httpStatus = response.httpStatus;
+    } catch (err) {
+      const e = err as OpenSkyRequestError;
+      diagnostics.httpStatus = e.httpStatus;
+      return { position: null, reason: e.reason || 'PROVIDER_ERROR', diagnostics };
     } finally {
-      this.inFlightFetch = null;
+      diagnostics.authenticated = this.hasOAuthCredentials && !this.lastTokenFailed;
     }
+
+    const match = states.find((s) => (s[0] || '').trim().toLowerCase() === icao24) || null;
+    if (!match) return { position: null, reason: 'NO_MATCH', diagnostics };
+
+    const evaluated = evaluateState(match, flightNumber);
+    diagnostics.matched = true;
+    diagnostics.positionTime = evaluated.positionTime;
+    diagnostics.ageSeconds = positionAgeSeconds(evaluated.positionTime);
+    return { position: evaluated.position, reason: evaluated.reason, diagnostics };
   }
 
-  private async fetchStates(): Promise<OpenSkyStateVector[]> {
-    const token = await this.getAccessToken();
+  /**
+   * Fallback without a hex: exact callsign match (after normalization),
+   * never prefix or airline-only matching.
+   */
+  private async getByCallsign(candidates: string[], flightNumber: string, bbox: BoundingBox | null): Promise<LiveResolutionResult> {
+    const diagnostics = this.baseDiagnostics('CALLSIGN', candidates.join(','));
+    diagnostics.area = bbox ? `${bbox.lamin},${bbox.lomin},${bbox.lamax},${bbox.lomax}` : 'global';
 
-    if (config.isDev) {
-      console.log('[LiveFlightService] Calling live position provider (OpenSky /states/all)', {
-        authenticated: Boolean(token),
-      });
-    }
-
+    let states: OpenSkyStateVector[];
     try {
-      const response = await this.client.get('/states/all', {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
-
-      const states: OpenSkyStateVector[] = Array.isArray(response.data?.states) ? response.data.states : [];
-
-      if (config.isDev) {
-        console.log(
-          '[LiveFlightService] Provider response status:', response.status,
-          '| aircraft count:', states.length,
-          '| rate limit remaining:', response.headers['x-rate-limit-remaining']
-        );
-      }
-
-      return states;
-    } catch (err: any) {
-      if (config.isDev) {
-        console.log('[LiveFlightService] Provider request failed:', err.response?.status, err.message);
-      }
-      const error: any = new Error('Unable to retrieve live aircraft position.');
-      error.statusCode = 502;
-      error.code = 'LIVE_PROVIDER_ERROR';
-      throw error;
+      const snapshot = await this.getStatesInArea(bbox, diagnostics);
+      states = snapshot.states;
+    } catch (err) {
+      const e = err as OpenSkyRequestError;
+      diagnostics.httpStatus = e.httpStatus;
+      return { position: null, reason: e.reason || 'PROVIDER_ERROR', diagnostics };
+    } finally {
+      diagnostics.authenticated = this.hasOAuthCredentials && !this.lastTokenFailed;
     }
+
+    // Candidates are in priority order; a state must carry a real ICAO24 to
+    // be verifiable as one specific aircraft.
+    let match: OpenSkyStateVector | undefined;
+    for (const candidate of candidates) {
+      match = states.find((s) => normalizeCallsign(s[1]) === candidate && Boolean(normalizeIcao24(s[0])));
+      if (match) break;
+    }
+    if (!match) return { position: null, reason: 'NO_MATCH', diagnostics };
+
+    const evaluated = evaluateState(match, flightNumber);
+    diagnostics.matched = true;
+    diagnostics.positionTime = evaluated.positionTime;
+    diagnostics.ageSeconds = positionAgeSeconds(evaluated.positionTime);
+    return { position: evaluated.position, reason: evaluated.reason, diagnostics };
+  }
+
+  private async getStatesInArea(
+    bbox: BoundingBox | null,
+    diagnostics: LiveLookupDiagnostics
+  ): Promise<{ states: OpenSkyStateVector[]; httpStatus: number }> {
+    const key = bbox ? `${bbox.lamin}|${bbox.lomin}|${bbox.lamax}|${bbox.lomax}` : 'global';
+    const cached = this.areaCache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.areaCacheTtlMs) {
+      diagnostics.cached = true;
+      diagnostics.httpStatus = cached.httpStatus;
+      return cached;
+    }
+
+    let inFlight = this.areaInFlight.get(key);
+    if (!inFlight) {
+      inFlight = this.requestStates(bbox ? { ...bbox } : {})
+        .then((snapshot) => {
+          this.areaCache.set(key, { ...snapshot, timestamp: Date.now() });
+          // Keep the cache small: drop expired areas.
+          for (const [k, v] of this.areaCache) {
+            if (Date.now() - v.timestamp >= this.areaCacheTtlMs) this.areaCache.delete(k);
+          }
+          return snapshot;
+        })
+        .finally(() => this.areaInFlight.delete(key));
+      this.areaInFlight.set(key, inFlight);
+    }
+    const snapshot = await inFlight;
+    diagnostics.httpStatus = snapshot.httpStatus;
+    return snapshot;
   }
 }
 

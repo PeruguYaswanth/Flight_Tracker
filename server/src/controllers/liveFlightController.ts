@@ -1,23 +1,34 @@
 import { Request, Response, NextFunction } from 'express';
-import { isFresh, liveFlightService, LiveFlightPosition, normalizeCallsign } from '../services/liveFlightService';
+import {
+  BoundingBox,
+  isFresh,
+  isValidCoordinate,
+  liveFlightService,
+  LiveFlightPosition,
+  LiveReason,
+  normalizeCallsign,
+  normalizeIcao24,
+  positionAgeSeconds,
+  PROVIDER_FAILURE_REASONS,
+} from '../services/liveFlightService';
 import { AircraftIdentifiers, flightService } from '../services/flightService';
 import { getAirlineByCode } from '../services/airlinesData';
+import { getAirportCoords } from '../services/airportsData';
 import { config } from '../config/environment';
-
-// A real ICAO24 / ADS-B hex address is exactly 6 hexadecimal characters.
-// Anything that doesn't match this pattern (e.g. "UAE527") is a callsign,
-// not an ICAO24, and must NEVER be sent to OpenSky as one.
-const ICAO24_PATTERN = /^[0-9a-f]{6}$/i;
-
-function isValidIcao24(value: string): boolean {
-  return ICAO24_PATTERN.test(value.trim());
-}
-
-function normalizeIcao24(value: string): string {
-  return value.trim().toLowerCase();
-}
+import { LiveFlightResponse } from '../types/flight';
 
 const METERS_TO_FEET = 3.28084;
+
+const REASON_MESSAGES: Record<LiveReason, string> = {
+  NO_IDENTIFIER: 'No aircraft identifier could be resolved for this flight.',
+  NO_MATCH: 'Live position is currently unavailable for this flight.',
+  STALE: 'The last known position is too old to be shown as current.',
+  ON_GROUND: 'The aircraft is currently on the ground.',
+  INVALID_POSITION: 'The live data for this aircraft has no valid position.',
+  AUTH_ERROR: 'The live position service is temporarily unavailable.',
+  RATE_LIMITED: 'The live position service is busy. Please try again shortly.',
+  PROVIDER_ERROR: 'The live position service is temporarily unavailable.',
+};
 
 /**
  * ICAO-designator form of an IATA flight number from the static airline
@@ -32,8 +43,24 @@ export function deriveIcaoCallsign(flightIata: string): string | null {
   return airline ? `${airline.icao}${m[2]}` : null;
 }
 
-function isValidCoordinate(lat: number, lng: number): boolean {
-  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(lat === 0 && lng === 0);
+/**
+ * Area around the route (both airports plus a margin) for the callsign
+ * lookup, so OpenSky returns the aircraft near this route instead of the
+ * whole world. Null (global search) when an airport is unknown or the
+ * route crosses the antimeridian.
+ */
+export function routeBoundingBox(depIata?: string, arrIata?: string): BoundingBox | null {
+  const dep = getAirportCoords(depIata);
+  const arr = getAirportCoords(arrIata);
+  if (!dep || !arr) return null;
+  if (Math.abs(dep.lng - arr.lng) > 180) return null;
+  const round = (v: number) => Math.round(v * 10) / 10;
+  return {
+    lamin: round(Math.max(-90, Math.min(dep.lat, arr.lat) - 6)),
+    lamax: round(Math.min(90, Math.max(dep.lat, arr.lat) + 6)),
+    lomin: round(Math.max(-180, Math.min(dep.lng, arr.lng) - 8)),
+    lomax: round(Math.min(180, Math.max(dep.lng, arr.lng) + 8)),
+  };
 }
 
 /**
@@ -58,208 +85,166 @@ export function airLabsFallbackPosition(identifiers: AircraftIdentifiers, flight
     speed: p.speedKmh !== null ? Math.round(p.speedKmh) : null,
     isGround: false,
     updatedAt: p.updated !== null ? new Date(p.updated * 1000).toISOString() : null,
+    timestamp: p.updated,
   };
+}
+
+/** One structured line per request - identifiers and outcomes only, never credentials. */
+function logLive(fields: Record<string, string | number | boolean | null | undefined>): void {
+  const line = Object.entries(fields)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${v === null || v === '' ? 'null' : v}`)
+    .join(' ');
+  console.log(`[LIVE] ${line}`);
+}
+
+function unavailable(res: Response, flightNumber: string, reason: LiveReason, httpStatus?: number): void {
+  const providerFailure = PROVIDER_FAILURE_REASONS.includes(reason);
+  const body: LiveFlightResponse = {
+    success: !providerFailure,
+    data: {
+      flightNumber,
+      hasLiveTracking: false,
+      live: null,
+      liveUnavailableReason: reason,
+      message: REASON_MESSAGES[reason],
+    },
+  };
+  res.status(httpStatus ?? (reason === 'RATE_LIMITED' ? 503 : providerFailure ? 502 : 200)).json(body);
 }
 
 export class LiveFlightController {
   /**
    * GET /api/live-flights/:flightNumber
-   *   ?icao=<icaoCallsign>          — ICAO callsign (e.g. "UAE527"), NOT necessarily an ICAO24
-   *   &icao24=<hex>                 — Aircraft hex transponder address (e.g. "710abc")
-   *   &registration=<reg>           — Aircraft registration (supplementary)
-   *   &operatingFlightNumber=<num>  — Operating carrier's flight number for codeshares
+   *   ?callsign=<ICAO callsign>     e.g. "IGO5221" - a callsign, never an ICAO24
+   *   &icao24=<hex>                 aircraft hex, used only if it really is 6 hex characters
+   *   &operatingFlightNumber=<num>  operating flight for codeshares
+   *   &depIata=&arrIata=            route airports, to bound the callsign lookup
    *
-   * Identifier resolution priority:
-   *  1. `icao24` query param — only used if it is genuinely a 6-hex-char ICAO24.
-   *     If the value is a callsign like "UAE527", it is reclassified and used
-   *     as a callsign fallback instead, never as ICAO24.
-   *  2. AirLabs /flights lookup by IATA flight number → aircraft.hex
-   *     If no hex, retries with the ICAO callsign (e.g. UAE527).
-   *  3. If codeshare, AirLabs /flights lookup by operating flight number.
-   *  4. Exact OpenSky callsign match (case/whitespace-normalised, never prefix).
-   *  5. No valid state → LIVE_POSITION_UNAVAILABLE.
+   * Always answers with LiveFlightResponse:
+   *   200 { success: true,  data: { hasLiveTracking: true,  live: {...} } }
+   *   200 { success: true,  data: { hasLiveTracking: false, live: null, liveUnavailableReason: NO_MATCH | STALE | ... } }
+   *   502/503 { success: false, data: { ..., liveUnavailableReason: AUTH_ERROR | RATE_LIMITED | PROVIDER_ERROR } }
+   *
+   * Lookup order:
+   *  1. Codeshare -> the operating flight's identity only.
+   *  2. ICAO24: valid `icao24` param, else the hex from AirLabs' live /flights record.
+   *  3. With a hex: OpenSky by ICAO24; if OpenSky has no usable state,
+   *     AirLabs' own fresh position for that same hex.
+   *  4. Without a hex: exact callsigns (AirLabs-reported, ICAO-form flight
+   *     number, IATA number) against OpenSky, within the route area.
    */
   public static async getLivePosition(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { flightNumber } = req.params;
-      const rawIcaoParam = req.query.icao ? String(req.query.icao).trim() : '';
+      const requestedCallsign = req.query.callsign ? String(req.query.callsign).trim() : '';
       const rawIcao24Param = req.query.icao24 ? String(req.query.icao24).trim() : '';
-      const registration = req.query.registration ? String(req.query.registration).trim() : '';
       const operatingFlightNumber = req.query.operatingFlightNumber ? String(req.query.operatingFlightNumber).trim() : '';
+      const depIata = req.query.depIata ? String(req.query.depIata).trim().toUpperCase() : '';
+      const arrIata = req.query.arrIata ? String(req.query.arrIata).trim().toUpperCase() : '';
 
       if (!flightNumber || !flightNumber.trim()) {
-        res.status(400).json({
-          success: false,
-          error: {
-            code: 'MISSING_AIRCRAFT_IDENTIFIER',
-            reason: 'no_aircraft_identifier',
-            message: 'A live position lookup requires a flight number.',
-          },
-        });
+        unavailable(res, '', 'NO_IDENTIFIER', 400);
         return;
       }
 
-      // ── Step 1: Classify the input identifier ──────────────────────────────
-      // The `icao` param is always treated as a callsign (it says "icao" in the
-      // query string but it contains ICAO callsigns like "UAE527", not hex).
-      // The `icao24` param is ONLY used if it actually looks like a 6-hex ICAO24.
-      // If someone passes a callsign in the icao24 slot, catch that here.
-
-      let icaoCallsign: string = rawIcaoParam || ''; // e.g. "UAE527"
-      let resolvedIcao24: string | null = null;
-      let icao24Source: 'frontend_supplied' | 'airlabs_primary' | 'airlabs_codeshare' | null = null;
-
-      if (rawIcao24Param) {
-        if (isValidIcao24(rawIcao24Param)) {
-          resolvedIcao24 = normalizeIcao24(rawIcao24Param);
-          icao24Source = 'frontend_supplied';
-          if (config.isDev) {
-            console.log(`[LiveFlight] Input identifier: ${rawIcao24Param}`);
-            console.log(`[LiveFlight] Identifier type: icao24`);
-          }
-        } else {
-          // Value looks like a callsign (e.g. "UAE527") not a hex address.
-          // Demote it to the callsign slot if we don't already have one.
-          if (!icaoCallsign) {
-            icaoCallsign = rawIcao24Param;
-          }
-          if (config.isDev) {
-            console.log(`[LiveFlight] Input identifier: ${rawIcao24Param}`);
-            console.log(`[LiveFlight] Identifier type: callsign (reclassified from icao24 param — not a valid hex)`);
-          }
-        }
-      }
-
-      if (config.isDev) {
-        console.log(`[LiveFlight] Flight: ${flightNumber}`);
-        if (icaoCallsign) {
-          console.log(`[LiveFlight] Input identifier: ${icaoCallsign}`);
-          console.log(`[LiveFlight] Identifier type: callsign`);
-        }
-      }
-
-      // ── Step 2: Operating identity ─────────────────────────────────────────
-      // A codeshare's aircraft only ever broadcasts under the operating
-      // carrier's identity (QF8786 flies as 6E6202 / IGO...), so the
-      // marketing number and callsign are never used for the lookup.
+      // ── Operating identity ──────────────────────────────────────────────────
+      // A codeshare's aircraft only broadcasts under the operating carrier's
+      // identity (QF8786 flies as 6E6202), so the marketing number and
+      // callsign are never used for the lookup.
       const isCodeshare =
         Boolean(operatingFlightNumber) && operatingFlightNumber.toUpperCase() !== flightNumber.toUpperCase();
       const lookupNumber = (isCodeshare ? operatingFlightNumber : flightNumber).toUpperCase();
       const derivedCallsign = deriveIcaoCallsign(lookupNumber);
-      const lookupIcao = (isCodeshare ? derivedCallsign : icaoCallsign || derivedCallsign) || null;
-      if (config.isDev && isCodeshare) {
-        console.log(`[LiveFlight] Operating flight: ${lookupNumber} (codeshare of ${flightNumber})`);
-      }
+      const lookupCallsign = (isCodeshare ? derivedCallsign : normalizeCallsign(requestedCallsign) || derivedCallsign) || null;
 
-      // ── Step 3: AirLabs lookup for hex (if no validated ICAO24 yet) ────────
-      let resolvedRegistration = registration || null;
+      // ── ICAO24 ──────────────────────────────────────────────────────────────
+      // Only a genuine 6-hex address is ever sent to OpenSky as icao24.
+      let icao24 = normalizeIcao24(rawIcao24Param);
+      let icao24Source: string | null = icao24 ? 'request' : null;
       let identifiers: AircraftIdentifiers | null = null;
-
-      if (!resolvedIcao24) {
-        identifiers = await flightService.getAircraftIdentifiers(lookupNumber, lookupIcao);
-        if (identifiers.icao24) {
-          resolvedIcao24 = identifiers.icao24;
-          resolvedRegistration = resolvedRegistration || identifiers.registration;
-          icao24Source = isCodeshare ? 'airlabs_codeshare' : 'airlabs_primary';
-        }
+      if (!icao24) {
+        identifiers = await flightService.getAircraftIdentifiers(lookupNumber, lookupCallsign);
+        icao24 = normalizeIcao24(identifiers.icao24);
+        if (icao24) icao24Source = 'airlabs';
       }
 
-      if (config.isDev && !resolvedIcao24) {
-        console.log(`[LiveFlight] No verified ICAO24 - falling back to exact callsign matching`);
-      }
-
-      // ── Step 4: OpenSky (ICAO24 first, then exact callsigns) ───────────────
-      // Callsign priority: what AirLabs reports the aircraft broadcasting,
-      // then the ICAO-form flight number, then the IATA number last.
+      // ── OpenSky ─────────────────────────────────────────────────────────────
       const result = await liveFlightService.resolveLivePosition({
-        flightIata: lookupNumber,
-        flightIcao: lookupIcao,
-        icao24: resolvedIcao24,
-        registration: resolvedRegistration,
-        icao24Source,
-        callsignCandidates: [identifiers?.callsign, lookupIcao, lookupNumber],
+        flightNumber,
+        icao24,
+        callsignCandidates: [identifiers?.callsign, lookupCallsign, lookupNumber],
+        bbox: routeBoundingBox(depIata, arrIata),
       });
-
       let position: LiveFlightPosition | null = result.position;
       let source: 'opensky' | 'airlabs' = 'opensky';
+      let fallbackNote: string | null = null;
 
-      // ── Step 5: AirLabs position for the same aircraft ─────────────────────
-      // OpenSky's receiver coverage has gaps (e.g. much of India); AirLabs
-      // often still has a fresh ADS-B fix for the very same hex. An
-      // OpenSky "on ground" answer is respected, not overridden.
-      if (!position && resolvedIcao24 && result.reason !== 'aircraft_on_ground') {
-        const latest = await flightService.getAircraftIdentifiers(lookupNumber, lookupIcao, {
+      // ── AirLabs position for the same aircraft ─────────────────────────────
+      // Covers OpenSky receiver gaps and OpenSky outages. An OpenSky "on
+      // ground" answer is respected, not overridden.
+      if (!position && icao24 && result.reason !== 'ON_GROUND') {
+        const latest = await flightService.getAircraftIdentifiers(lookupNumber, lookupCallsign, {
           maxAgeMs: config.airLabsPositionMaxAgeMs,
         });
-        if (latest.icao24 === resolvedIcao24) {
+        if (normalizeIcao24(latest.icao24) === icao24) {
           position = airLabsFallbackPosition(latest, flightNumber);
           if (position) source = 'airlabs';
-        }
-        if (config.isDev) {
-          console.log(`[LiveFlight] AirLabs position fallback: ${position ? 'used' : `rejected (status ${latest.status ?? 'none'}, hex match ${latest.icao24 === resolvedIcao24})`}`);
+          fallbackNote = position ? 'used' : `rejected(status:${latest.status ?? 'none'},age:${positionAgeSeconds(latest.position?.updated ?? null) ?? 'n/a'}s)`;
+        } else {
+          fallbackNote = 'no_airlabs_record';
         }
       }
 
-      if (config.isDev) {
-        console.log(
-          `[LiveFlight] Final result: ${
-            position
-              ? `position resolved via ${source === 'airlabs' ? 'airlabs_position' : result.strategy} (icao24 ${position.icao24})`
-              : `unavailable via ${result.strategy} - ${result.reason}`
-          }`
-        );
-      }
+      const status = position ? 'POSITION_FOUND' : result.reason ?? 'NO_MATCH';
+      const d = result.diagnostics;
+      logLive({
+        flight: flightNumber,
+        operating: isCodeshare ? lookupNumber : undefined,
+        callsign: position?.callsign ?? lookupCallsign,
+        airlabsCallsign: identifiers?.callsign ?? null,
+        icao24,
+        icao24Source,
+        lookup: d.method,
+        lookupValue: d.value,
+        area: d.method === 'CALLSIGN' ? d.area : undefined,
+        openskyStatus: d.cached ? `${d.httpStatus ?? 'null'}(cached)` : d.httpStatus,
+        openskyAuth: d.authenticated ? 'oauth' : config.openskyClientId ? 'token_failed' : 'anonymous',
+        matched: d.matched,
+        openskyResult: result.reason ?? 'POSITION_FOUND',
+        airlabsFallback: fallbackNote ?? undefined,
+        source: position ? source : undefined,
+        lat: position?.latitude.toFixed(6),
+        lon: position?.longitude.toFixed(6),
+        age: position ? `${positionAgeSeconds(position.timestamp)}s` : d.ageSeconds !== null ? `${d.ageSeconds}s` : undefined,
+        status,
+      });
 
-      // ── Response ────────────────────────────────────────────────────────────
       if (!position) {
-        // Map internal reason codes to the public reason vocabulary
-        const reasonMap: Record<string, string> = {
-          airlabs_icao24_missing: 'no_aircraft_identifier',
-          opensky_icao24_not_visible: 'no_opensky_position',
-          callsign_not_currently_visible: 'no_opensky_position',
-          stale_opensky_position: 'stale_opensky_position',
-          aircraft_on_ground: 'aircraft_on_ground',
-        };
-        const reason = result.reason ? (reasonMap[result.reason] || result.reason) : 'no_opensky_position';
-
-        const messageMap: Record<string, string> = {
-          no_aircraft_identifier: 'No aircraft identifier could be resolved for this flight.',
-          no_opensky_position: 'No current aircraft position is available.',
-          stale_opensky_position: 'The last known position is too old to be considered live.',
-          aircraft_on_ground: 'The aircraft is currently on the ground.',
-        };
-
-        res.status(404).json({
-          success: false,
-          error: {
-            code: 'LIVE_POSITION_UNAVAILABLE',
-            reason,
-            message: messageMap[reason] || 'No current aircraft position is available.',
-          },
-        });
+        unavailable(res, flightNumber, result.reason ?? 'NO_MATCH');
         return;
       }
 
-      // Build the structured success response per specification
-      const pos = position;
-      res.json({
+      const body: LiveFlightResponse = {
         success: true,
-        position: {
-          latitude: pos.latitude,
-          longitude: pos.longitude,
-          altitude: pos.altitude ?? null,
-          speed: pos.speed ?? null,
-          heading: pos.heading ?? null,
-          isGround: pos.isGround ?? false,
-          updatedAt: pos.updatedAt ?? null,
+        data: {
+          flightNumber,
+          hasLiveTracking: true,
+          // Identity is the aircraft actually matched - not the request input.
+          live: {
+            latitude: position.latitude,
+            longitude: position.longitude,
+            altitude: position.altitude ?? null,
+            speed: position.speed ?? null,
+            heading: position.heading ?? null,
+            callsign: position.callsign,
+            icao24: position.icao24,
+            timestamp: position.updatedAt ?? null,
+            source,
+          },
         },
-        // Identity of the aircraft actually matched - not the request input.
-        aircraft: {
-          icao24: pos.icao24,
-          callsign: pos.callsign,
-        },
-        source,
-      });
+      };
+      res.json(body);
     } catch (error) {
       next(error);
     }

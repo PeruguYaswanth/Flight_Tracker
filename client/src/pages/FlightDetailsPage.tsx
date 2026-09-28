@@ -10,7 +10,7 @@ import { ErrorState } from '../components/ErrorState';
 import { EmptyState } from '../components/EmptyState';
 import { Flight } from '../types/flight';
 import { FlightApiClient } from '../services/flightApi';
-import { LiveFlightApiClient, LiveFlightPosition, describeLiveUnavailableReason } from '../services/liveFlightApi';
+import { LiveFlightApiClient, LiveFlightPosition } from '../services/liveFlightApi';
 
 const DETAILS_POLL_INTERVAL_MS = 60000;
 const LIVE_POSITION_POLL_INTERVAL_MS = 60000;
@@ -38,20 +38,6 @@ const PHASE_MESSAGES: Record<Exclude<LivePhase, 'airborne'>, string> = {
   cancelled: 'This flight is cancelled, so there is no live aircraft position.',
 };
 
-function describePositionRefreshError(code?: string, reason?: string | null): string {
-  if (code === 'RATE_LIMIT_EXCEEDED') {
-    return 'Live position temporarily unavailable due to API rate limits.';
-  }
-  if (code === 'SERVICE_TIMEOUT') {
-    return 'Live ADS-B service is taking too long to respond.';
-  }
-  if (reason) {
-    return describeLiveUnavailableReason(reason);
-  }
-  return 'Unable to retrieve live flight position.';
-}
-
-
 export const FlightDetailsPage: React.FC = () => {
   const { flightNumber } = useParams<{ flightNumber: string }>();
   const location = useLocation();
@@ -65,8 +51,7 @@ export const FlightDetailsPage: React.FC = () => {
 
   const [livePosition, setLivePosition] = useState<LiveFlightPosition | null>(null);
   const [isLoadingLivePosition, setIsLoadingLivePosition] = useState<boolean>(false);
-  const [livePositionError, setLivePositionError] = useState<string | null>(null);
-  // Set when the backend genuinely has no current position (not a transport error).
+  // Why there is no live position (no match, stale, provider failure...).
   const [liveUnavailableMessage, setLiveUnavailableMessage] = useState<string | null>(null);
 
   const flightDateRef = useRef<string | undefined>(undefined);
@@ -128,16 +113,17 @@ export const FlightDetailsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flightNumber]);
 
-  // Live aircraft position. icao24 and icaoCallsign are hints; for a
+  // Live aircraft position. icao24 and callsign are hints; for a
   // codeshare the backend looks the aircraft up by the operating flight.
   const icao24 = flight?.aircraft?.icao24 || null;
-  const icaoCallsign = flight?.flightIcao || null;
+  const callsign = flight?.flightIcao || null;
   const operatingFlightNumber = flight?.operatingFlightIata || null;
+  const depIata = flight?.departure.iata || null;
+  const arrIata = flight?.arrival.iata || null;
   const livePhase = flight ? getLivePhase(flight) : null;
 
   useEffect(() => {
     setLivePosition(null);
-    setLivePositionError(null);
     setLiveUnavailableMessage(null);
 
     // Wait for the flight, and only look up flights that can be airborne -
@@ -158,27 +144,18 @@ export const FlightDetailsPage: React.FC = () => {
       setIsLoadingLivePosition(isInitial);
 
       try {
-        const position = await LiveFlightApiClient.getLivePosition(
-          flightNumber,
-          icaoCallsign,
+        const result = await LiveFlightApiClient.getLivePosition(flightNumber, {
+          callsign,
           icao24,
-          operatingFlightNumber
-        );
+          operatingFlightNumber,
+          depIata,
+          arrIata,
+        });
         if (cancelled) return;
-        setLivePosition(position);
-        setLivePositionError(null);
-        setLiveUnavailableMessage(null);
-      } catch (err: any) {
-        if (cancelled) return;
-        if (err.code === 'LIVE_POSITION_UNAVAILABLE') {
-          // Position genuinely unavailable - not a map failure. The route still
-          // renders; the map overlay explains why there is no aircraft marker.
-          setLivePosition(null);
-          setLivePositionError(null);
-          setLiveUnavailableMessage(describeLiveUnavailableReason(err.reason));
-        } else {
-          setLivePositionError(describePositionRefreshError(err.code, err.reason));
-        }
+        // No position means no marker - a previous fix is never kept on
+        // screen as if it were still current. The route still renders.
+        setLivePosition(result.available ? result.position : null);
+        setLiveUnavailableMessage(result.available ? null : result.message);
       } finally {
         if (!cancelled) setIsLoadingLivePosition(false);
       }
@@ -191,7 +168,7 @@ export const FlightDetailsPage: React.FC = () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [icao24, icaoCallsign, flightNumber, operatingFlightNumber, livePhase]);
+  }, [icao24, callsign, flightNumber, operatingFlightNumber, depIata, arrIata, livePhase]);
 
   // Memoized flight object for FlightMap
   const flightForMap: Flight | null = useMemo(() => {
@@ -208,6 +185,8 @@ export const FlightDetailsPage: React.FC = () => {
             isGround: livePosition.isGround,
             updatedAt: livePosition.updatedAt,
             source: livePosition.source,
+            callsign: livePosition.callsign,
+            icao24: livePosition.icao24,
           }
         : null,
       hasLiveTracking: Boolean(livePosition),
@@ -253,16 +232,12 @@ export const FlightDetailsPage: React.FC = () => {
         {!isLoading && !errorMessage && flight && flightForMap && (
           <div className="space-y-6">
             {/* Live Telemetry Indicator Bar */}
-            {(isLoadingLivePosition || livePositionError) && (
+            {isLoadingLivePosition && (
               <div className="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-2xs flex items-center justify-between text-xs">
-                {isLoadingLivePosition ? (
-                  <span className="text-sky-700 font-semibold flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
-                    Connecting to live OpenSky ADS-B radar network...
-                  </span>
-                ) : (
-                  <span className="text-amber-800 font-medium">{livePositionError}</span>
-                )}
+                <span className="text-sky-700 font-semibold flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+                  Connecting to live ADS-B data...
+                </span>
               </div>
             )}
 
