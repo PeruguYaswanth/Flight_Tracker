@@ -19,6 +19,40 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 // codeshare not yet resolved, etc.) can change within minutes.
 const HEX_NEGATIVE_CACHE_TTL_MS = 2 * 60 * 1000;
 
+// User-facing text for any provider-side failure. The specific cause
+// (auth, timeout, outage) stays in the error code and server logs - no
+// provider internals or credential hints reach the client.
+const PROVIDER_UNAVAILABLE_MESSAGE = 'Flight data is temporarily unavailable. Please try again.';
+
+/**
+ * Position AirLabs reports for the aircraft in the same `/flights` record
+ * the hex comes from (ADS-B based). Raw provider units.
+ */
+export interface AirLabsPosition {
+  latitude: number;
+  longitude: number;
+  altitudeMeters: number | null;
+  speedKmh: number | null;
+  heading: number | null;
+  /** Unix seconds of AirLabs' last update for this aircraft. */
+  updated: number | null;
+}
+
+export interface AircraftIdentifiers {
+  icao24: string | null;
+  registration: string | null;
+  /** Callsign AirLabs reports for the live record (may be alphanumeric, e.g. IGO274E). */
+  callsign: string | null;
+  status: string | null;
+  position: AirLabsPosition | null;
+}
+
+const EMPTY_IDENTIFIERS: AircraftIdentifiers = { icao24: null, registration: null, callsign: null, status: null, position: null };
+
+function toNumberOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
 /**
  * AirLabs integration for flight search/details. OpenSky (liveFlightService)
  * remains the exclusive source for live aircraft position - this service
@@ -28,8 +62,8 @@ export class FlightService {
   private client: AxiosInstance;
   private cache = new Map<string, CacheEntry>();
   private inFlightRequests = new Map<string, Promise<Flight[]>>();
-  private hexCache = new Map<string, { timestamp: number; value: { icao24: string | null; registration: string | null } }>();
-  private hexInFlightRequests = new Map<string, Promise<{ icao24: string | null; registration: string | null }>>();
+  private hexCache = new Map<string, { timestamp: number; value: AircraftIdentifiers }>();
+  private hexInFlightRequests = new Map<string, Promise<AircraftIdentifiers>>();
 
   constructor() {
     this.client = axios.create({
@@ -115,7 +149,9 @@ export class FlightService {
       // Use the format the input actually looks like rather than guessing:
       // IATA-style is a 2-letter airline code + digits; anything else is
       // tried as an ICAO-style callsign (3-letter code + digits).
-      if (/^[A-Z]{2}\d+[A-Z]?$/.test(clean)) {
+      // IATA airline codes may contain a digit (IndiGo "6E", "G8", "I5"),
+      // so "6E840" is IATA; "UAE527" (3 letters) stays ICAO.
+      if (/^([A-Z]{2}|[A-Z]\d|\d[A-Z])\d{1,4}[A-Z]?$/.test(clean)) {
         params.flight_iata = clean;
       } else {
         params.flight_icao = clean;
@@ -166,6 +202,15 @@ export class FlightService {
     }
 
     const rawItems: any[] = Array.isArray(response.data?.response) ? response.data.response : [];
+
+    // This AirLabs plan returns at most 100 records and does not page
+    // further; busy codeshare-heavy routes can exceed that.
+    if (config.isDev && response.data?.request?.has_more) {
+      console.log('[AirLabs] Result truncated by provider', {
+        returned: rawItems.length,
+        totalItems: response.data.request.total_items ?? null,
+      });
+    }
     const flights: Flight[] = rawItems.map((item) => FlightNormalizer.normalizeAirLabs(item));
 
     if (config.isDev) {
@@ -180,9 +225,26 @@ export class FlightService {
    * (and therefore its cache) - never issues a second AirLabs request just
    * to re-fetch information the search already returned.
    */
-  public async getFlightByNumber(flightNumber: string, date?: string): Promise<Flight | null> {
+  public async getFlightByNumber(
+    flightNumber: string,
+    date?: string,
+    depIata?: string,
+    arrIata?: string
+  ): Promise<Flight | null> {
     const results = await this.searchFlights({ flightNumber, flightDate: date });
-    return results.length > 0 ? results[0] : null;
+    // AirLabs can return several instances of one flight number (other
+    // days, multi-leg). When the caller knows which instance it is showing,
+    // return exactly that one instead of whatever happens to be first.
+    const dep = depIata?.trim().toUpperCase();
+    const arr = arrIata?.trim().toUpperCase();
+    const matches = results.filter(
+      (f) =>
+        (!dep || f.departure.iata.toUpperCase() === dep) &&
+        (!arr || f.arrival.iata.toUpperCase() === arr)
+    );
+    const exact = date ? matches.find((f) => f.flightDate === date) : undefined;
+    if (dep || arr) return exact || matches[0] || null;
+    return exact || results[0] || null;
   }
 
   /**
@@ -201,13 +263,19 @@ export class FlightService {
    * results are never charged this extra request. Cached and deduplicated
    * the same way as searchFlights.
    */
-  public async getAircraftIdentifiers(flightNumber: string): Promise<{ icao24: string | null; registration: string | null }> {
+  public async getAircraftIdentifiers(
+    flightNumber: string,
+    flightIcao?: string | null,
+    options: { maxAgeMs?: number } = {}
+  ): Promise<AircraftIdentifiers> {
     if (!config.airLabsApiKey || config.airLabsApiKey.trim() === '') {
-      return { icao24: null, registration: null };
+      return { ...EMPTY_IDENTIFIERS };
     }
 
     const clean = flightNumber.trim().toUpperCase();
-    const cacheKey = `hex:${clean}`;
+    const icaoClean = flightIcao?.trim().toUpperCase() || null;
+    // Include the icao in the cache key so different combinations are cached separately
+    const cacheKey = `hex:${clean}${icaoClean ? `:${icaoClean}` : ''}`;
 
     const cached = this.hexCache.get(cacheKey);
     if (cached) {
@@ -215,7 +283,10 @@ export class FlightService {
       // one - AirLabs' live feed changes minute to minute (a flight that
       // hasn't started broadcasting yet will shortly), so a stale negative
       // must not block resolution once the aircraft actually appears.
-      const ttl = cached.value.icao24 ? CACHE_TTL_MS : HEX_NEGATIVE_CACHE_TTL_MS;
+      // Callers that use the position (not just the hex) pass a tighter
+      // maxAgeMs so a cached position is never presented as current.
+      const baseTtl = cached.value.icao24 ? CACHE_TTL_MS : HEX_NEGATIVE_CACHE_TTL_MS;
+      const ttl = options.maxAgeMs !== undefined ? Math.min(baseTtl, options.maxAgeMs) : baseTtl;
       const age = Date.now() - cached.timestamp;
       if (age < ttl) {
         if (config.isDev) {
@@ -233,7 +304,7 @@ export class FlightService {
       return inFlight;
     }
 
-    const promise = this.fetchAircraftIdentifiers(clean)
+    const promise = this.fetchAircraftIdentifiers(clean, icaoClean)
       .then((value) => {
         this.hexCache.set(cacheKey, { timestamp: Date.now(), value });
         return value;
@@ -241,7 +312,7 @@ export class FlightService {
       .catch(() => {
         // A failure here must not break the live-position flow - it just
         // means no hex is available, so the caller falls back to callsign.
-        const value = { icao24: null, registration: null };
+        const value = { ...EMPTY_IDENTIFIERS };
         this.hexCache.set(cacheKey, { timestamp: Date.now(), value });
         return value;
       })
@@ -253,11 +324,52 @@ export class FlightService {
     return promise;
   }
 
-  private async fetchAircraftIdentifiers(flightIata: string): Promise<{ icao24: string | null; registration: string | null }> {
-    const params: Record<string, any> = { api_key: config.airLabsApiKey, flight_iata: flightIata };
+  private async fetchAircraftIdentifiers(
+    flightIata: string,
+    flightIcao?: string | null
+  ): Promise<AircraftIdentifiers> {
+    // Try IATA lookup first
+    const result = await this.fetchAircraftIdentifiersByParam('flight_iata', flightIata);
+    if (result.icao24) {
+      if (config.isDev) {
+        console.log('[LiveFlight] AirLabs HEX (via IATA):', result.icao24);
+        console.log('[LiveFlight] AirLabs callsign:', result.callsign);
+        console.log('[LiveFlight] Status:', result.status);
+      }
+      return result;
+    }
+
+    // If IATA returned no hex and we have an ICAO callsign, try that too
+    if (flightIcao && flightIcao.toUpperCase() !== flightIata.toUpperCase()) {
+      if (config.isDev) {
+        console.log('[AirLabs] IATA lookup returned no hex - retrying with ICAO callsign', { flight_icao: flightIcao });
+      }
+      const icaoResult = await this.fetchAircraftIdentifiersByParam('flight_icao', flightIcao.toUpperCase());
+      if (config.isDev) {
+        console.log('[LiveFlight] AirLabs HEX (via ICAO callsign):', icaoResult.icao24);
+        console.log('[LiveFlight] AirLabs callsign:', icaoResult.callsign);
+        console.log('[LiveFlight] Status:', icaoResult.status);
+      }
+      // Keep the IATA record's callsign/status if the ICAO retry found nothing better.
+      return icaoResult.icao24 || !result.callsign ? icaoResult : result;
+    }
 
     if (config.isDev) {
-      console.log('[AirLabs] API request', { endpoint: '/flights', flight_iata: flightIata, purpose: 'aircraft hex lookup' });
+      console.log('[LiveFlight] AirLabs HEX: none');
+      console.log('[LiveFlight] AirLabs callsign:', result.callsign);
+      console.log('[LiveFlight] Status:', result.status);
+    }
+    return result;
+  }
+
+  private async fetchAircraftIdentifiersByParam(
+    paramName: 'flight_iata' | 'flight_icao',
+    paramValue: string
+  ): Promise<AircraftIdentifiers> {
+    const params: Record<string, any> = { api_key: config.airLabsApiKey, [paramName]: paramValue };
+
+    if (config.isDev) {
+      console.log('[AirLabs] API request', { endpoint: '/flights', [paramName]: paramValue, purpose: 'aircraft hex lookup' });
     }
 
     const response = await this.client.get('/flights', { params });
@@ -266,7 +378,7 @@ export class FlightService {
       if (config.isDev) {
         console.log('[AirLabs] /flights error for hex lookup:', JSON.stringify(response.data.error));
       }
-      return { icao24: null, registration: null };
+      return { ...EMPTY_IDENTIFIERS };
     }
 
     const items: any[] = Array.isArray(response.data?.response) ? response.data.response : [];
@@ -276,27 +388,45 @@ export class FlightService {
     // actually has a hex (AirLabs can return a record for a flight without
     // ADS-B data populated yet).
     const matching = items.filter(
-      (it) => String(it.flight_iata || '').toUpperCase() === flightIata || String(it.flight_icao || '').toUpperCase() === flightIata
+      (it) =>
+        String(it.flight_iata || '').toUpperCase() === paramValue ||
+        String(it.flight_icao || '').toUpperCase() === paramValue
     );
     const item = matching.find((it) => it.hex) || matching[0] || null;
 
     if (config.isDev) {
       console.log('[AirLabs] /flights query result', {
-        flight_iata: flightIata,
+        [paramName]: paramValue,
         totalRecordsReturned: items.length,
         matchingRecords: matching.length,
+        hasHex: Boolean(item?.hex),
       });
     }
 
     if (!item) {
       if (config.isDev) {
-        console.log('[AirLabs] /flights returned no live entry for', flightIata, '- no hex available');
+        console.log('[AirLabs] /flights returned no live entry for', paramValue, '- no hex available');
       }
-      return { icao24: null, registration: null };
+      return { ...EMPTY_IDENTIFIERS };
     }
 
     const icao24 = item.hex ? String(item.hex).trim().toLowerCase() : null;
     const registration = item.reg_number || null;
+    const callsign = item.flight_icao || item.flight_iata || null;
+    const status = item.status || null;
+    const lat = toNumberOrNull(item.lat);
+    const lng = toNumberOrNull(item.lng);
+    const position: AirLabsPosition | null =
+      lat !== null && lng !== null
+        ? {
+            latitude: lat,
+            longitude: lng,
+            altitudeMeters: toNumberOrNull(item.alt),
+            speedKmh: toNumberOrNull(item.speed),
+            heading: toNumberOrNull(item.dir),
+            updated: toNumberOrNull(item.updated),
+          }
+        : null;
 
     if (config.isDev) {
       console.log('[AirLabs] Aircraft resolution result', {
@@ -304,7 +434,7 @@ export class FlightService {
         flightIcao: item.flight_icao || null,
         icao24,
         registration,
-        status: item.status || null,
+        status,
         airline: item.airline_iata || item.airline_icao || null,
         departure: item.dep_iata || null,
         arrival: item.arr_iata || null,
@@ -312,7 +442,7 @@ export class FlightService {
       });
     }
 
-    return { icao24, registration };
+    return { icao24, registration, callsign, status, position };
   }
 
   /**
@@ -365,7 +495,8 @@ export class FlightService {
     let error: any;
 
     if (rawCode.includes('key') || rawCode === '401' || rawMessage.includes('key') || rawMessage.includes('unauthorized')) {
-      error = new Error('Flight data service authentication failed.');
+      if (config.isDev) console.log('[AirLabs] Provider authentication failed (check AIRLABS_API_KEY)');
+      error = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
       error.statusCode = 401;
       error.code = 'AUTHENTICATION_FAILED';
     } else if (rawCode.includes('limit') || rawCode === '429' || rawMessage.includes('limit') || rawMessage.includes('usage')) {
@@ -373,7 +504,8 @@ export class FlightService {
       error.statusCode = 429;
       error.code = 'RATE_LIMIT_EXCEEDED';
     } else {
-      error = new Error(apiError.message || 'Unable to retrieve flight data at this time.');
+      if (config.isDev) console.log('[AirLabs] Provider API error', { code: apiError.code, message: apiError.message });
+      error = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
       error.statusCode = 502;
       error.code = 'API_ERROR';
     }
@@ -393,7 +525,7 @@ export class FlightService {
     }
 
     if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
-      const error: any = new Error('The flight-data service is taking too long to respond. Please try again.');
+      const error: any = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
       error.statusCode = 504;
       error.code = 'SERVICE_TIMEOUT';
       throw error;
@@ -409,7 +541,7 @@ export class FlightService {
       }
 
       if (status === 401 || status === 403) {
-        const error: any = new Error('Invalid or unauthorized flight-data API key.');
+        const error: any = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
         error.statusCode = 401;
         error.code = 'AUTHENTICATION_FAILED';
         throw error;
@@ -420,13 +552,14 @@ export class FlightService {
         error.code = 'RATE_LIMIT_EXCEEDED';
         throw error;
       }
-      const error: any = new Error('Unable to retrieve flight information from flight data provider.');
+      const error: any = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
       error.statusCode = status >= 500 ? 502 : status;
       error.code = 'API_ERROR';
       throw error;
     }
 
-    const error: any = new Error('Unable to connect to flight data service. Please check network connection.');
+    if (config.isDev) console.log('[AirLabs] Provider unreachable:', err.message);
+    const error: any = new Error(PROVIDER_UNAVAILABLE_MESSAGE);
     error.statusCode = 503;
     error.code = 'SERVICE_UNAVAILABLE';
     throw error;

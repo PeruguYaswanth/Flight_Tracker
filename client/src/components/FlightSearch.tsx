@@ -1,37 +1,80 @@
 import React, { useState } from 'react';
 import { FlightSearchFilters } from '../types/flight';
-import { Search, RotateCcw, Plane, MapPin, Calendar, Building2, Hash, Sparkles } from 'lucide-react';
+import { AirportAutocomplete } from './AirportAutocomplete';
+import { resolveToIata, formatAirportDisplay, findAmbiguousAirports, AIRPORT_DATABASE } from '../data/airportDatabase';
+import { Search, RotateCcw, Calendar, Building2, Hash, Sparkles, ArrowRightLeft } from 'lucide-react';
 
 interface FlightSearchProps {
   onSearch: (filters: FlightSearchFilters) => void;
   onReset: () => void;
   isLoading: boolean;
+  initialFilters?: FlightSearchFilters | null;
 }
 
 const SAMPLE_QUERIES = [
-  { label: 'AI101 (Air India)', mode: 'flight' as const, flightNumber: 'AI101', airline: 'Air India', depIata: '', arrIata: '' },
-  { label: '6E502 (IndiGo)', mode: 'flight' as const, flightNumber: '6E502', airline: 'IndiGo', depIata: '', arrIata: '' },
-  { label: 'BA249 (British Airways)', mode: 'flight' as const, flightNumber: 'BA249', airline: 'British Airways', depIata: '', arrIata: '' },
-  { label: 'HYD → DEL', mode: 'route' as const, flightNumber: '', airline: '', depIata: 'HYD', arrIata: 'DEL' },
-  { label: 'BOM → BLR', mode: 'route' as const, flightNumber: '', airline: '', depIata: 'BOM', arrIata: 'BLR' },
-  { label: 'LHR → JFK', mode: 'route' as const, flightNumber: '', airline: '', depIata: 'LHR', arrIata: 'JFK' },
+  { label: 'HYD → DEL', mode: 'route' as const, flightNumber: '', airline: '', depDisplay: 'Hyderabad (HYD)', arrDisplay: 'Delhi (DEL)', depIata: 'HYD', arrIata: 'DEL' },
+  { label: 'BOM → BLR', mode: 'route' as const, flightNumber: '', airline: '', depDisplay: 'Mumbai (BOM)', arrDisplay: 'Bengaluru (BLR)', depIata: 'BOM', arrIata: 'BLR' },
+  { label: 'DEL → MAA', mode: 'route' as const, flightNumber: '', airline: '', depDisplay: 'Delhi (DEL)', arrDisplay: 'Chennai (MAA)', depIata: 'DEL', arrIata: 'MAA' },
+  { label: 'LHR → JFK', mode: 'route' as const, flightNumber: '', airline: '', depDisplay: 'London Heathrow (LHR)', arrDisplay: 'New York JFK (JFK)', depIata: 'LHR', arrIata: 'JFK' },
+  { label: 'AI101 (Air India)', mode: 'flight' as const, flightNumber: 'AI101', airline: 'Air India', depDisplay: '', arrDisplay: '', depIata: '', arrIata: '' },
+  { label: '6E502 (IndiGo)', mode: 'flight' as const, flightNumber: '6E502', airline: 'IndiGo', depDisplay: '', arrDisplay: '', depIata: '', arrIata: '' },
+  { label: 'BA249 (British Airways)', mode: 'flight' as const, flightNumber: 'BA249', airline: 'British Airways', depDisplay: '', arrDisplay: '', depIata: '', arrIata: '' },
 ];
 
 export const FlightSearch: React.FC<FlightSearchProps> = ({
   onSearch,
   onReset,
   isLoading,
+  initialFilters,
 }) => {
-  const [mode, setMode] = useState<'flight' | 'route'>('flight');
-  const [flightNumber, setFlightNumber] = useState('');
-  const [airline, setAirline] = useState('');
-  const [flightDate, setFlightDate] = useState(new Date().toISOString().split('T')[0]);
-  const [depIata, setDepIata] = useState('');
-  const [arrIata, setArrIata] = useState('');
+  const [mode, setMode] = useState<'flight' | 'route'>(initialFilters?.mode || 'flight');
+  const [flightNumber, setFlightNumber] = useState(initialFilters?.flightNumber || '');
+  const [airline, setAirline] = useState(initialFilters?.airline || '');
+  const [flightDate, setFlightDate] = useState(
+    initialFilters?.flightDate || new Date().toISOString().split('T')[0]
+  );
+
+  // Route search state: store user input / display value + resolved IATA code
+  const [depDisplay, setDepDisplay] = useState(() => {
+    if (!initialFilters?.depIata) return '';
+    const airport = AIRPORT_DATABASE.find((a) => a.iata === initialFilters.depIata);
+    return airport ? formatAirportDisplay(airport) : initialFilters.depIata;
+  });
+  const [depIata, setDepIata] = useState(initialFilters?.depIata || '');
+
+  const [arrDisplay, setArrDisplay] = useState(() => {
+    if (!initialFilters?.arrIata) return '';
+    const airport = AIRPORT_DATABASE.find((a) => a.iata === initialFilters.arrIata);
+    return airport ? formatAirportDisplay(airport) : initialFilters.arrIata;
+  });
+  const [arrIata, setArrIata] = useState(initialFilters?.arrIata || '');
+
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const handleModeChange = (newMode: 'flight' | 'route') => {
     setMode(newMode);
+    setValidationError(null);
+  };
+
+  const handleDepChange = (displayValue: string, code: string | null) => {
+    setDepDisplay(displayValue);
+    setDepIata(code || resolveToIata(displayValue) || '');
+    setValidationError(null);
+  };
+
+  const handleArrChange = (displayValue: string, code: string | null) => {
+    setArrDisplay(displayValue);
+    setArrIata(code || resolveToIata(displayValue) || '');
+    setValidationError(null);
+  };
+
+  const handleSwapAirports = () => {
+    const tempDisplay = depDisplay;
+    const tempIata = depIata;
+    setDepDisplay(arrDisplay);
+    setDepIata(arrIata);
+    setArrDisplay(tempDisplay);
+    setArrIata(tempIata);
     setValidationError(null);
   };
 
@@ -41,34 +84,62 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
 
     if (mode === 'flight') {
       if (!flightNumber.trim() && !airline.trim()) {
-        setValidationError('Please enter a flight number or airline name.');
+        setValidationError('Please enter a flight number (e.g. AI101, 6E502) or airline name.');
         return;
       }
+
+      onSearch({
+        mode: 'flight',
+        flightNumber: flightNumber.trim(),
+        airline: airline.trim(),
+        flightDate,
+        depIata: '',
+        arrIata: '',
+      });
     } else {
-      if (!depIata.trim() || !arrIata.trim()) {
-        setValidationError('Please enter both departure and arrival airport codes.');
+      // Resolve IATA codes if user typed directly without selecting dropdown
+      const finalDepIata = (depIata || resolveToIata(depDisplay) || '').trim().toUpperCase();
+      const finalArrIata = (arrIata || resolveToIata(arrDisplay) || '').trim().toUpperCase();
+
+      const ambiguous = [depIata ? '' : depDisplay, arrIata ? '' : arrDisplay]
+        .map((text) => ({ text: text.trim(), airports: findAmbiguousAirports(text) }))
+        .find((a) => a.airports.length > 0);
+      if (ambiguous) {
+        setValidationError(
+          `"${ambiguous.text}" matches several airports (${ambiguous.airports.map((a) => a.iata).join(', ')}). Please choose one from the list.`
+        );
         return;
       }
-      if (depIata.trim().toUpperCase() === arrIata.trim().toUpperCase()) {
+
+      if (!finalDepIata || !finalArrIata) {
+        setValidationError(
+          'Please enter both departure and arrival airports or cities (e.g. Hyderabad, Delhi).'
+        );
+        return;
+      }
+
+      if (finalDepIata === finalArrIata) {
         setValidationError('Departure and arrival airports must be different.');
         return;
       }
-    }
 
-    onSearch({
-      mode,
-      flightNumber: flightNumber.trim(),
-      airline: airline.trim(),
-      flightDate,
-      depIata: depIata.trim().toUpperCase(),
-      arrIata: arrIata.trim().toUpperCase(),
-    });
+      onSearch({
+        mode: 'route',
+        flightNumber: '',
+        airline: '',
+        flightDate,
+        depIata: finalDepIata,
+        arrIata: finalArrIata,
+      });
+    }
   };
 
   const handleReset = () => {
     setFlightNumber('');
     setAirline('');
+    setDepDisplay('');
     setDepIata('');
+    setArrDisplay('');
     setArrIata('');
     setFlightDate(new Date().toISOString().split('T')[0]);
     setValidationError(null);
@@ -79,7 +150,9 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
     setMode(sample.mode);
     setFlightNumber(sample.flightNumber);
     setAirline(sample.airline);
+    setDepDisplay(sample.depDisplay);
     setDepIata(sample.depIata);
+    setArrDisplay(sample.arrDisplay);
     setArrIata(sample.arrIata);
     setValidationError(null);
 
@@ -94,39 +167,42 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
   };
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
-      {/* Search Header and Tabs */}
-      <div className="flex items-center justify-between pb-4 border-b border-slate-800/80 mb-4">
-        <div className="flex items-center gap-2">
-          <Search className="w-4 h-4 text-cyan-400" />
-          <h2 className="text-sm font-semibold tracking-wide uppercase text-slate-200">
-            Search Flights
+    <div className="bg-white border border-slate-200/90 rounded-2xl p-5 sm:p-6 shadow-sm">
+      {/* Search Header & Mode Tabs */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-slate-100 mb-5">
+        <div>
+          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <Search className="w-4 h-4 text-sky-600" />
+            Flight Status & Tracker Search
           </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Real-time status, schedules, and live route tracking
+          </p>
         </div>
 
         {/* Tab Switcher */}
-        <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+        <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs shrink-0 self-start sm:self-auto">
           <button
             type="button"
             onClick={() => handleModeChange('flight')}
-            className={`px-3 py-1 rounded-md font-medium transition-all ${
+            className={`px-4 py-1.5 rounded-lg font-semibold transition-all ${
               mode === 'flight'
-                ? 'bg-cyan-500 text-slate-950 font-semibold shadow'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-white text-sky-700 shadow-sm border border-slate-200/80'
+                : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Flight Number
+            Search by Flight
           </button>
           <button
             type="button"
             onClick={() => handleModeChange('route')}
-            className={`px-3 py-1 rounded-md font-medium transition-all ${
+            className={`px-4 py-1.5 rounded-lg font-semibold transition-all ${
               mode === 'route'
-                ? 'bg-cyan-500 text-slate-950 font-semibold shadow'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-white text-sky-700 shadow-sm border border-slate-200/80'
+                : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Route Search
+            Search by Route
           </button>
         </div>
       </div>
@@ -134,105 +210,112 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
       {/* Search Form */}
       <form onSubmit={handleSubmit} className="space-y-4">
         {mode === 'flight' ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Flight Number */}
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Hash className="w-3.5 h-3.5 text-cyan-400" />
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                <Hash className="w-3.5 h-3.5 text-sky-600" />
                 Flight Number
               </label>
               <input
                 type="text"
                 value={flightNumber}
                 onChange={(e) => setFlightNumber(e.target.value)}
-                placeholder="e.g. AI101 or 6E502"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition"
+                placeholder="e.g. 6E6372, AI101, BA249"
+                className="w-full bg-white border border-slate-300 hover:border-slate-400 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none transition shadow-sm font-mono uppercase"
               />
             </div>
 
             {/* Airline */}
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Building2 className="w-3.5 h-3.5 text-cyan-400" />
-                Airline / Carrier
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                <Building2 className="w-3.5 h-3.5 text-sky-600" />
+                Airline / Carrier (Optional)
               </label>
               <input
                 type="text"
                 value={airline}
                 onChange={(e) => setAirline(e.target.value)}
-                placeholder="e.g. Air India, IndiGo, BA"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition"
+                placeholder="e.g. IndiGo, Air India, Emirates"
+                className="w-full bg-white border border-slate-300 hover:border-slate-400 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none transition shadow-sm"
               />
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Departure Airport */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-cyan-400" />
-                Departure Airport (IATA)
-              </label>
-              <input
-                type="text"
-                value={depIata}
-                maxLength={4}
-                onChange={(e) => setDepIata(e.target.value.toUpperCase())}
-                placeholder="e.g. HYD, BOM, LHR"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 uppercase font-mono transition"
+          <div className="relative space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 relative">
+              {/* Departure Smart Autocomplete */}
+              <AirportAutocomplete
+                label="From (Origin)"
+                placeholder="Type city or airport (e.g. Hyderabad, HYD)"
+                value={depDisplay}
+                onChange={handleDepChange}
+                iconColor="text-sky-600"
+              />
+
+              {/* Arrival Smart Autocomplete */}
+              <AirportAutocomplete
+                label="To (Destination)"
+                placeholder="Type city or airport (e.g. Delhi, DEL)"
+                value={arrDisplay}
+                onChange={handleArrChange}
+                iconColor="text-emerald-600"
               />
             </div>
 
-            {/* Arrival Airport */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Plane className="w-3.5 h-3.5 text-emerald-400 rotate-45" />
-                Arrival Airport (IATA)
-              </label>
-              <input
-                type="text"
-                value={arrIata}
-                maxLength={4}
-                onChange={(e) => setArrIata(e.target.value.toUpperCase())}
-                placeholder="e.g. DEL, BLR, JFK"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 uppercase font-mono transition"
-              />
-            </div>
+            {/* Swap Origin / Destination Button */}
+            {depDisplay && arrDisplay && (
+              <div className="flex justify-center -mt-2">
+                <button
+                  type="button"
+                  onClick={handleSwapAirports}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-sky-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 px-3 py-1 rounded-full transition shadow-2xs"
+                  title="Swap Departure and Arrival"
+                >
+                  <ArrowRightLeft className="w-3 h-3" />
+                  <span>Swap Airports</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* Date Selector */}
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+          <label className="text-xs font-semibold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+            <Calendar className="w-3.5 h-3.5 text-sky-600" />
             Flight Date
           </label>
           <input
             type="date"
             value={flightDate}
             onChange={(e) => setFlightDate(e.target.value)}
-            className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition"
+            aria-describedby="flight-date-hint"
+            className="w-full bg-white border border-slate-300 hover:border-slate-400 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm font-medium text-slate-900 focus:outline-none transition shadow-sm"
           />
+          <p id="flight-date-hint" className="text-[11px] text-slate-500">
+            Live schedules cover flights in the air now and departing in the coming hours.
+          </p>
         </div>
 
-        {/* Validation Alert */}
+        {/* Validation Error Banner */}
         {validationError && (
-          <p className="text-xs text-rose-400 bg-rose-950/40 border border-rose-800/60 rounded-lg p-2 font-medium">
-            {validationError}
-          </p>
+          <div className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3 font-medium flex items-center gap-2">
+            <span>{validationError}</span>
+          </div>
         )}
 
-        {/* Actions */}
+        {/* Action Buttons */}
         <div className="flex items-center gap-3 pt-2">
           <button
             type="submit"
             disabled={isLoading}
-            className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-semibold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+            className="flex-1 bg-sky-600 hover:bg-sky-700 active:bg-sky-800 text-white font-semibold py-3 px-5 rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed text-sm"
           >
             {isLoading ? (
-              <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
             ) : (
-              <Search className="w-4 h-4 text-slate-950" />
+              <Search className="w-4 h-4 text-white" />
             )}
             <span>Search Flights</span>
           </button>
@@ -241,20 +324,20 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
             type="button"
             onClick={handleReset}
             disabled={isLoading}
-            className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-all text-sm font-medium flex items-center gap-1.5 active:scale-[0.98]"
+            className="px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all text-sm font-medium flex items-center gap-1.5 shrink-0"
             title="Reset search fields"
           >
-            <RotateCcw className="w-4 h-4 text-slate-400" />
+            <RotateCcw className="w-4 h-4 text-slate-500" />
             <span className="hidden sm:inline">Reset</span>
           </button>
         </div>
       </form>
 
-      {/* Quick Demo Search Chips */}
-      <div className="mt-5 pt-4 border-t border-slate-800/80">
-        <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-2.5">
-          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-          <span className="font-medium text-slate-300">Quick Test Searches:</span>
+      {/* Quick Test Search Chips */}
+      <div className="mt-5 pt-4 border-t border-slate-100">
+        <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-2.5">
+          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+          <span className="font-semibold text-slate-700">Popular Quick Searches:</span>
         </div>
         <div className="flex flex-wrap gap-1.5">
           {SAMPLE_QUERIES.map((sample, idx) => (
@@ -262,7 +345,7 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
               key={idx}
               type="button"
               onClick={() => applySample(sample)}
-              className="text-xs bg-slate-950 hover:bg-cyan-950/60 text-slate-300 hover:text-cyan-300 border border-slate-800 hover:border-cyan-700/50 px-2.5 py-1 rounded-lg transition-all font-mono"
+              className="text-xs bg-slate-50 hover:bg-sky-50 text-slate-700 hover:text-sky-700 border border-slate-200 hover:border-sky-300 px-3 py-1.5 rounded-lg transition font-medium font-mono"
             >
               {sample.label}
             </button>

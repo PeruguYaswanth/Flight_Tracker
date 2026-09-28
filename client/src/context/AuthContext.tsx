@@ -6,6 +6,8 @@ const TOKEN_STORAGE_KEY = 'aerotrack_auth_token';
 
 interface AuthContextValue {
   user: User | null;
+  /** Session token for authenticated API calls (null when signed out). */
+  token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -86,12 +88,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const value = useMemo<AuthContextValue>(() => ({
     user,
+    token,
     isAuthenticated: Boolean(user),
     isLoading,
     login,
     signup,
     logout,
-  }), [user, isLoading, login, signup, logout]);
+  }), [user, token, isLoading, login, signup, logout]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

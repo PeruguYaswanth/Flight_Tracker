@@ -33,6 +33,8 @@ export interface LivePosition {
   speed?: number | null;
   isGround?: boolean;
   updatedAt?: string | null;
+  /** Which provider the position came from ('opensky' | 'airlabs'). */
+  source?: string | null;
 }
 
 export interface AircraftInfo {
@@ -59,6 +61,8 @@ export interface Flight {
   // The actual operating carrier's flight number when this flight is a
   // codeshare (from AirLabs' own codeshare fields, never guessed).
   operatingFlightIata?: string | null;
+  // Marketing flight numbers for the same physical flight (route search).
+  codeshares?: string[] | null;
   airline: AirlineInfo;
   flightDate: string;
   status: FlightStatus;

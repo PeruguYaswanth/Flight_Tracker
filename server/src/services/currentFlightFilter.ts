@@ -1,78 +1,120 @@
-import { Flight, FlightStatus } from '../types/flight';
-
-// These statuses mean the flight is definitively not airborne right now,
-// regardless of what the timestamps say (sparse/missing arrival data must
-// never let a cancelled or already-landed record slip through).
-const NON_ACTIVE_STATUSES: FlightStatus[] = ['landed', 'cancelled', 'incident', 'diverted'];
+import { Flight } from '../types/flight';
 
 // Grace window applied only when falling back to an ESTIMATED or SCHEDULED
 // arrival time (never to an ACTUAL arrival, which is authoritative) to
 // absorb minor drift between the provider's estimate and real touchdown.
 const ARRIVAL_GRACE_MS = 15 * 60 * 1000;
 
-function parseInstant(iso?: string | null): Date | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
+// A departure that is still "scheduled" this long after its time is kept:
+// boarding/pushback is often not reflected in the feed yet.
+const UPCOMING_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+// Upcoming departures further out than this are not "current" results.
+const UPCOMING_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
+// No scheduled passenger flight is airborne longer than this; an "active"
+// record older than that is a stale provider record, not a flight in the air.
+const MAX_AIRBORNE_MS = 20 * 60 * 60 * 1000;
 
-// Aviationstack's departure/arrival timestamps are full ISO-8601 strings
-// with an explicit UTC offset (e.g. "2026-09-18T02:15:00+00:00"). Parsing
-// them with `new Date()` resolves that offset into an absolute instant, so
-// comparing two Date objects here is timezone-safe - no raw string
-// comparisons and no naive UTC-vs-local mixing.
-function utcDateKey(d: Date): string {
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD in UTC
+export type FlightPhase = 'airborne' | 'upcoming' | 'cancelled' | 'finished';
+
+function parseMs(iso?: string | null): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 /**
- * True only when `flight` is genuinely airborne/en-route at `now`, based on
- * the provider's own timestamps and status - never guessed or assumed.
+ * Where a flight is right now, from the provider's own status and
+ * timestamps only - never guessed from the schedule alone.
  *
- * Rules (all must hold):
- *  1. Status is not landed/cancelled/incident/diverted.
- *  2. It has an actual, or failing that estimated, or failing that
- *     scheduled departure time, and that time is not in the future.
- *  3. It has not arrived: no actual arrival time has passed, and no
- *     estimated/scheduled arrival time (+ grace) has passed either.
- *  4. Its departure instant falls on today's UTC calendar date - this is
- *     what excludes yesterday's and tomorrow's records for the same flight
- *     number. (Trade-off: a flight that departed late yesterday UTC and is
- *     still airborne past midnight UTC would be excluded by this rule; the
- *     task's own spec calls for a hard "flight date is today" check, so
- *     this is applied literally rather than loosened.)
+ *  - finished: landed/diverted/incident, or the arrival has passed.
+ *  - airborne: the provider says active, or reports an actual departure.
+ *    A scheduled departure time that has passed is NOT enough.
+ *  - upcoming: scheduled/delayed/unknown and departing between 2h ago and
+ *    24h ahead.
+ *  - cancelled: cancelled, with its departure in that same window.
  */
-export function isCurrentlyFlying(flight: Flight, now: Date = new Date()): boolean {
-  if (NON_ACTIVE_STATUSES.includes(flight.status)) {
-    return false;
+export function classifyFlight(flight: Flight, now: Date = new Date()): FlightPhase {
+  const t = now.getTime();
+
+  if (flight.status === 'landed' || flight.status === 'diverted' || flight.status === 'incident') {
+    return 'finished';
   }
 
-  const departure =
-    parseInstant(flight.departure.actualTime) ||
-    parseInstant(flight.departure.estimatedTime) ||
-    parseInstant(flight.departure.scheduledTime);
+  const actualArrival = parseMs(flight.arrival.actualTime);
+  if (actualArrival !== null && t >= actualArrival) return 'finished';
 
-  // No departure information at all means we cannot confirm it has left the
-  // ground - exclude rather than guess. This also naturally excludes
-  // future-dated records that have no actual/estimated departure yet.
-  if (!departure) return false;
-  if (now.getTime() < departure.getTime()) return false;
+  const plannedDeparture = parseMs(flight.departure.estimatedTime) ?? parseMs(flight.departure.scheduledTime);
+  const inUpcomingWindow =
+    plannedDeparture !== null && plannedDeparture >= t - UPCOMING_LOOKBACK_MS && plannedDeparture <= t + UPCOMING_LOOKAHEAD_MS;
 
-  const actualArrival = parseInstant(flight.arrival.actualTime);
-  if (actualArrival) {
-    if (now.getTime() >= actualArrival.getTime()) return false;
-  } else {
-    const fallbackArrival = parseInstant(flight.arrival.estimatedTime) || parseInstant(flight.arrival.scheduledTime);
-    if (fallbackArrival && now.getTime() >= fallbackArrival.getTime() + ARRIVAL_GRACE_MS) {
-      return false;
+  if (flight.status === 'cancelled') {
+    return inUpcomingWindow ? 'cancelled' : 'finished';
+  }
+
+  const actualDeparture = parseMs(flight.departure.actualTime);
+  const hasDeparted = flight.status === 'active' || (actualDeparture !== null && actualDeparture <= t);
+
+  if (hasDeparted) {
+    const departedAt = actualDeparture ?? plannedDeparture;
+    if (departedAt !== null && t - departedAt > MAX_AIRBORNE_MS) return 'finished';
+    if (actualArrival === null) {
+      const fallbackArrival = parseMs(flight.arrival.estimatedTime) ?? parseMs(flight.arrival.scheduledTime);
+      if (fallbackArrival !== null && t >= fallbackArrival + ARRIVAL_GRACE_MS) return 'finished';
     }
+    return 'airborne';
   }
 
-  if (utcDateKey(departure) !== utcDateKey(now)) return false;
-
-  return true;
+  return inUpcomingWindow ? 'upcoming' : 'finished';
 }
 
-export function filterCurrentlyFlying(flights: Flight[], now: Date = new Date()): Flight[] {
-  return flights.filter((f) => isCurrentlyFlying(f, now));
+export function isCurrentlyFlying(flight: Flight, now: Date = new Date()): boolean {
+  return classifyFlight(flight, now) === 'airborne';
+}
+
+/**
+ * Flights worth showing in search results right now: in the air, departing
+ * soon, or recently cancelled - sorted by departure time. Finished flights
+ * (landed, arrived, stale records) are dropped.
+ */
+export function filterRelevantFlights(flights: Flight[], now: Date = new Date()): Flight[] {
+  const departureMs = (f: Flight) =>
+    parseMs(f.departure.actualTime) ?? parseMs(f.departure.estimatedTime) ?? parseMs(f.departure.scheduledTime) ?? Infinity;
+  return flights
+    .filter((f) => classifyFlight(f, now) !== 'finished')
+    .sort((a, b) => departureMs(a) - departureMs(b));
+}
+
+/**
+ * AirLabs lists every codeshare as its own record (HYD->DEL: 35 of 48
+ * records were codeshares of 13 physical flights). When the operating
+ * record is in the same result set - same number, route and scheduled
+ * departure - the marketing records are folded into it as `codeshares`.
+ * A codeshare whose operating record isn't present is kept as-is.
+ */
+export function collapseCodeshares(flights: Flight[]): Flight[] {
+  const keyOf = (number: string, f: Flight) =>
+    `${number.toUpperCase()}|${f.departure.iata}|${f.arrival.iata}|${f.departure.scheduledTime ?? ''}`;
+
+  const operating = new Map<string, Flight>();
+  for (const f of flights) {
+    if (!f.operatingFlightIata) operating.set(keyOf(f.flightIata || f.flightNumber, f), { ...f, codeshares: [] });
+  }
+
+  const result: Flight[] = [];
+  const emitted = new Set<Flight>();
+  for (const f of flights) {
+    const op = f.operatingFlightIata
+      ? operating.get(keyOf(f.operatingFlightIata, f))
+      : operating.get(keyOf(f.flightIata || f.flightNumber, f));
+    if (f.operatingFlightIata && op) {
+      op.codeshares!.push(f.flightNumber);
+      continue;
+    }
+    const out = op ?? f;
+    if (!emitted.has(out)) {
+      emitted.add(out);
+      result.push(out);
+    }
+  }
+  return result;
 }

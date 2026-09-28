@@ -4,34 +4,53 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { FlightDetails } from '../components/FlightDetails';
 import { FlightMap } from '../components/FlightMap';
+import { TrackFlightButton } from '../components/TrackFlightButton';
 import { LoadingState } from '../components/LoadingState';
 import { ErrorState } from '../components/ErrorState';
 import { EmptyState } from '../components/EmptyState';
 import { Flight } from '../types/flight';
 import { FlightApiClient } from '../services/flightApi';
-import { LiveFlightApiClient, LiveFlightPosition } from '../services/liveFlightApi';
+import { LiveFlightApiClient, LiveFlightPosition, describeLiveUnavailableReason } from '../services/liveFlightApi';
 
-// Aviationstack flight-details refresh (status/schedule/gate) - unrelated
-// to live position, kept at a relaxed cadence since these fields change
-// slowly.
 const DETAILS_POLL_INTERVAL_MS = 60000;
-
-// Live aircraft position now comes from a separate provider (OpenSky
-// Network, see server/src/services/liveFlightService.ts) with a much
-// stricter anonymous quota (~400 requests/day). 60s matches the backend's
-// cache TTL so repeated polls mostly hit the server-side cache instead of
-// hammering the upstream provider.
 const LIVE_POSITION_POLL_INTERVAL_MS = 60000;
 
-function describePositionRefreshError(code?: string): string {
+type LivePhase = 'airborne' | 'not_departed' | 'landed' | 'cancelled';
+
+/**
+ * Whether a live aircraft position can exist right now, from the provider's
+ * status and timestamps. A passed scheduled departure time alone does not
+ * make a flight airborne.
+ */
+function getLivePhase(flight: Flight): LivePhase {
+  if (flight.status === 'landed' || flight.arrival.actualTime) return 'landed';
+  if (flight.status === 'cancelled') return 'cancelled';
+  if (flight.status === 'active' || flight.departure.actualTime) return 'airborne';
+  // Diverted aircraft may still be flying; with no status, let the live
+  // providers decide rather than guessing.
+  if (flight.status === 'diverted' || flight.status === 'unknown') return 'airborne';
+  return 'not_departed';
+}
+
+const PHASE_MESSAGES: Record<Exclude<LivePhase, 'airborne'>, string> = {
+  not_departed: 'The live aircraft position will appear once this flight departs.',
+  landed: 'This flight has landed. Live position is only shown while the aircraft is airborne.',
+  cancelled: 'This flight is cancelled, so there is no live aircraft position.',
+};
+
+function describePositionRefreshError(code?: string, reason?: string | null): string {
   if (code === 'RATE_LIMIT_EXCEEDED') {
-    return 'Live position temporarily unavailable due to API limits.';
+    return 'Live position temporarily unavailable due to API rate limits.';
   }
   if (code === 'SERVICE_TIMEOUT') {
-    return 'Unable to retrieve live flight position. Please try again.';
+    return 'Live ADS-B service is taking too long to respond.';
   }
-  return 'Unable to retrieve live flight position. Please try again.';
+  if (reason) {
+    return describeLiveUnavailableReason(reason);
+  }
+  return 'Unable to retrieve live flight position.';
 }
+
 
 export const FlightDetailsPage: React.FC = () => {
   const { flightNumber } = useParams<{ flightNumber: string }>();
@@ -47,21 +66,18 @@ export const FlightDetailsPage: React.FC = () => {
   const [livePosition, setLivePosition] = useState<LiveFlightPosition | null>(null);
   const [isLoadingLivePosition, setIsLoadingLivePosition] = useState<boolean>(false);
   const [livePositionError, setLivePositionError] = useState<string | null>(null);
+  // Set when the backend genuinely has no current position (not a transport error).
+  const [liveUnavailableMessage, setLiveUnavailableMessage] = useState<string | null>(null);
 
-  // Keep polling the same day's instance of this flight number for the
-  // Aviationstack details refresh, even after `flight` state is replaced.
   const flightDateRef = useRef<string | undefined>(undefined);
+  // Route of the instance being shown, so refreshes return that same instance.
+  const routeRef = useRef<{ depIata?: string; arrIata?: string }>({});
 
-  // --- Flight details (Aviationstack) - unchanged source, relaxed polling ---
+  // Flight details loading & polling
   useEffect(() => {
     if (!flightNumber) return;
 
     let cancelled = false;
-
-    // Reset for the newly-selected flight up front. Without this, switching
-    // from one /flight/:flightNumber to another without an unmount (React
-    // Router re-renders the same instance on a param change) would keep
-    // showing the PREVIOUS flight's stale data.
     setErrorMessage(null);
 
     const load = async (isInitial: boolean) => {
@@ -71,10 +87,11 @@ export const FlightDetailsPage: React.FC = () => {
       }
 
       try {
-        const result = await FlightApiClient.getFlightDetails(flightNumber, flightDateRef.current);
+        const result = await FlightApiClient.getFlightDetails(flightNumber, flightDateRef.current, undefined, routeRef.current);
         if (cancelled) return;
 
         flightDateRef.current = result.flightDate;
+        routeRef.current = { depIata: result.departure.iata, arrIata: result.arrival.iata };
         setFlight(result);
       } catch (err: any) {
         if (cancelled) return;
@@ -82,8 +99,6 @@ export const FlightDetailsPage: React.FC = () => {
         if (isInitial) {
           setErrorMessage(err.message || 'Unable to retrieve flight information.');
         } else {
-          // A background refresh failure should not blow away the page or
-          // the last known flight data.
           console.warn('[FlightDetailsPage] Background flight-details refresh failed:', err.message);
         }
       } finally {
@@ -93,13 +108,13 @@ export const FlightDetailsPage: React.FC = () => {
     };
 
     if (preloadedFlight) {
-      // Already have this exact flight from search results - use it
-      // immediately instead of refetching, then poll for status updates.
       flightDateRef.current = preloadedFlight.flightDate;
+      routeRef.current = { depIata: preloadedFlight.departure.iata, arrIata: preloadedFlight.arrival.iata };
       setFlight(preloadedFlight);
       setIsLoading(false);
     } else {
       flightDateRef.current = undefined;
+      routeRef.current = {};
       setFlight(null);
       load(true);
     }
@@ -113,26 +128,27 @@ export const FlightDetailsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flightNumber]);
 
-  // --- Live aircraft position (OpenSky, separate from AirLabs) ---
-  // Keyed on the aircraft's real ICAO24/hex (preferred, from AirLabs'
-  // `hex` field - already present on `flight`, no extra AirLabs request)
-  // and the ICAO callsign as a fallback identifier. Stops the previous
-  // flight's polling and starts fresh whenever either changes (including
-  // to/from "no identifier available").
+  // Live aircraft position. icao24 and icaoCallsign are hints; for a
+  // codeshare the backend looks the aircraft up by the operating flight.
   const icao24 = flight?.aircraft?.icao24 || null;
   const icaoCallsign = flight?.flightIcao || null;
-  // The actual operating carrier's flight number when this is a codeshare
-  // (e.g. Qantas-marketed QF8786 operated by IndiGo as 6E6202) - lets the
-  // backend try resolving the physical aircraft's identity under its real
-  // operator when the marketing flight number has none of its own.
   const operatingFlightNumber = flight?.operatingFlightIata || null;
+  const livePhase = flight ? getLivePhase(flight) : null;
 
   useEffect(() => {
     setLivePosition(null);
     setLivePositionError(null);
+    setLiveUnavailableMessage(null);
 
-    if ((!icao24 && !icaoCallsign) || !flightNumber) {
+    // Wait for the flight, and only look up flights that can be airborne -
+    // no provider calls for flights that haven't departed or have finished.
+    if (!flightNumber || !livePhase) {
       setIsLoadingLivePosition(false);
+      return;
+    }
+    if (livePhase !== 'airborne') {
+      setIsLoadingLivePosition(false);
+      setLiveUnavailableMessage(PHASE_MESSAGES[livePhase]);
       return;
     }
 
@@ -142,20 +158,26 @@ export const FlightDetailsPage: React.FC = () => {
       setIsLoadingLivePosition(isInitial);
 
       try {
-        const position = await LiveFlightApiClient.getLivePosition(flightNumber, icaoCallsign, icao24, operatingFlightNumber);
+        const position = await LiveFlightApiClient.getLivePosition(
+          flightNumber,
+          icaoCallsign,
+          icao24,
+          operatingFlightNumber
+        );
         if (cancelled) return;
         setLivePosition(position);
         setLivePositionError(null);
+        setLiveUnavailableMessage(null);
       } catch (err: any) {
         if (cancelled) return;
         if (err.code === 'LIVE_POSITION_UNAVAILABLE') {
-          // Normal outcome - flight isn't currently ADS-B tracked. The
-          // existing FlightMap banner already communicates this; no need
-          // for a separate error message.
+          // Position genuinely unavailable - not a map failure. The route still
+          // renders; the map overlay explains why there is no aircraft marker.
           setLivePosition(null);
           setLivePositionError(null);
+          setLiveUnavailableMessage(describeLiveUnavailableReason(err.reason));
         } else {
-          setLivePositionError(describePositionRefreshError(err.code));
+          setLivePositionError(describePositionRefreshError(err.code, err.reason));
         }
       } finally {
         if (!cancelled) setIsLoadingLivePosition(false);
@@ -169,14 +191,9 @@ export const FlightDetailsPage: React.FC = () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [icao24, icaoCallsign, flightNumber, operatingFlightNumber]);
+  }, [icao24, icaoCallsign, flightNumber, operatingFlightNumber, livePhase]);
 
-  // Feed the OpenSky position into the EXISTING, unmodified FlightMap by
-  // shaping it as the `live` field it already knows how to render - the
-  // map component itself is untouched. Memoized on [flight, livePosition]
-  // so FlightMap only re-runs its redraw/fitBounds effect when the actual
-  // flight or position data changes, not on every render of this page
-  // (e.g. the loading-indicator toggling).
+  // Memoized flight object for FlightMap
   const flightForMap: Flight | null = useMemo(() => {
     if (!flight) return null;
     return {
@@ -190,6 +207,7 @@ export const FlightDetailsPage: React.FC = () => {
             speed: livePosition.speed,
             isGround: livePosition.isGround,
             updatedAt: livePosition.updatedAt,
+            source: livePosition.source,
           }
         : null,
       hasLiveTracking: Boolean(livePosition),
@@ -197,28 +215,32 @@ export const FlightDetailsPage: React.FC = () => {
   }, [flight, livePosition]);
 
   return (
-    <Layout>
-      <div className="max-w-5xl w-full mx-auto p-3 sm:p-5 lg:p-6 space-y-5">
-        <button
-          onClick={() => navigate(-1)}
-          className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-cyan-400 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to Flight Results
-        </button>
+    <Layout headerProps={{ showLiveStatus: true, lastUpdated: flight?.lastUpdated }}>
+      <div className="max-w-5xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        {/* Back navigation + tracking */}
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <button
+            onClick={() => navigate(-1)}
+            className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 hover:text-sky-700 transition-colors py-2"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Flight Results</span>
+          </button>
+          {!isLoading && !errorMessage && flight && <TrackFlightButton flight={flight} />}
+        </div>
 
-        {isLoading && <LoadingState message="Loading flight details..." />}
+        {isLoading && <LoadingState message="Loading flight information and tracking telemetry..." />}
 
         {!isLoading && errorMessage && (
-          <div className="space-y-3">
-            <ErrorState message="Unable to load flight details. Please try again." onRetry={() => navigate(0)} />
+          <div className="space-y-4">
+            <ErrorState message={errorMessage} onRetry={() => navigate(0)} />
             <div className="text-center">
               <button
-                onClick={() => navigate(-1)}
-                className="inline-flex items-center gap-1.5 text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
+                onClick={() => navigate('/flight-status')}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-sm shadow-sm transition"
               >
                 <ArrowLeft className="w-4 h-4" />
-                Back to Flight Results
+                Back to Flight Search
               </button>
             </div>
           </div>
@@ -229,22 +251,27 @@ export const FlightDetailsPage: React.FC = () => {
         )}
 
         {!isLoading && !errorMessage && flight && flightForMap && (
-          <>
+          <div className="space-y-6">
+            {/* Live Telemetry Indicator Bar */}
             {(isLoadingLivePosition || livePositionError) && (
-              <div className="flex items-center gap-2 text-xs">
+              <div className="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-2xs flex items-center justify-between text-xs">
                 {isLoadingLivePosition ? (
-                  <span className="text-cyan-400 flex items-center gap-1.5">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Loading live aircraft position...
+                  <span className="text-sky-700 font-semibold flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+                    Connecting to live OpenSky ADS-B radar network...
                   </span>
                 ) : (
-                  <span className="text-amber-400">{livePositionError}</span>
+                  <span className="text-amber-800 font-medium">{livePositionError}</span>
                 )}
               </div>
             )}
-            <FlightMap selectedFlight={flightForMap} />
+
+            {/* Interactive Flight Radar Map */}
+            <FlightMap selectedFlight={flightForMap} liveUnavailableMessage={liveUnavailableMessage} />
+
+            {/* Structured Flight Details Cards */}
             <FlightDetails flight={flight} />
-          </>
+          </div>
         )}
       </div>
     </Layout>

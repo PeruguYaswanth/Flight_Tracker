@@ -64,6 +64,9 @@ export interface Flight {
   // position/ADS-B data is typically only discoverable under the
   // operating flight's identity, not the marketing one.
   operatingFlightIata?: string | null;
+  // Marketing flight numbers folded into this (operating) record by route
+  // search - the same physical flight, listed once.
+  codeshares?: string[] | null;
   airline: AirlineInfo;
   flightDate: string;
   status: FlightStatus;

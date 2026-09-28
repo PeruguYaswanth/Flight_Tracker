@@ -4,6 +4,10 @@ import { LivePosition } from '../types/flight';
 
 export interface LiveFlightPosition extends LivePosition {
   flightNumber: string;
+  /** ICAO24 of the OpenSky state vector that was actually matched. */
+  icao24: string;
+  /** Callsign OpenSky reports for that state vector (trimmed), if any. */
+  callsign: string | null;
 }
 
 interface OpenSkyStateVector extends Array<any> {
@@ -25,7 +29,8 @@ export type LiveUnavailableReason =
   | 'airlabs_icao24_missing'
   | 'opensky_icao24_not_visible'
   | 'callsign_not_currently_visible'
-  | 'stale_opensky_position';
+  | 'stale_opensky_position'
+  | 'aircraft_on_ground';
 
 export interface LiveResolutionResult {
   position: LiveFlightPosition | null;
@@ -62,8 +67,10 @@ function normalizeIcao24(raw?: string | null): string | null {
   return ICAO24_PATTERN.test(cleaned) ? cleaned : null;
 }
 
-function normalizeCallsign(raw?: string | null): string {
-  return (raw || '').replace(/\s+/g, '').toUpperCase();
+// "UAE527 ", "uae-527" and "UAE 527" all normalize to "UAE527". Exact
+// comparison only - never prefix matching.
+export function normalizeCallsign(raw?: string | null): string {
+  return (raw || '').replace(/[\s-]+/g, '').toUpperCase();
 }
 
 const METERS_TO_FEET = 3.28084;
@@ -75,7 +82,7 @@ const MPS_TO_KMH = 3.6;
 // little, so this is generous without being unbounded.
 const MAX_POSITION_AGE_SECONDS = 15 * 60;
 
-function isFresh(lastContact: number | null): boolean {
+export function isFresh(lastContact: number | null): boolean {
   if (typeof lastContact !== 'number') return false;
   return Date.now() / 1000 - lastContact <= MAX_POSITION_AGE_SECONDS;
 }
@@ -92,6 +99,8 @@ function mapStateVectorToPosition(match: OpenSkyStateVector, flightNumber: strin
 
   return {
     flightNumber,
+    icao24: (match[0] || '').trim().toLowerCase(),
+    callsign: normalizeCallsign(match[1]) || null,
     latitude: latitude as number,
     longitude: longitude as number,
     altitude: typeof baroAltitudeM === 'number' ? Math.round(baroAltitudeM * METERS_TO_FEET) : null,
@@ -107,6 +116,11 @@ export interface ResolveLivePositionParams {
   flightIcao?: string | null;
   icao24?: string | null;
   registration?: string | null;
+  /**
+   * Exact callsigns to try against OpenSky when no ICAO24 is known, in
+   * priority order. Defaults to [flightIcao, flightIata].
+   */
+  callsignCandidates?: Array<string | null | undefined>;
   /** How icao24 (if any) was obtained - purely for logging/diagnostics. */
   icao24Source?: 'frontend_supplied' | 'airlabs_primary' | 'airlabs_codeshare' | null;
 }
@@ -248,7 +262,8 @@ export class LiveFlightService {
       console.log('[LiveFlightService] Identifier strategy', { strategy: 'callsign_fallback' });
     }
 
-    const candidates = [flightIcao, flightIata].filter((c): c is string => Boolean(c));
+    const candidates = (params.callsignCandidates?.length ? params.callsignCandidates : [flightIcao, flightIata])
+      .filter((c): c is string => Boolean(c));
     const result = await this.getByCallsign(candidates, flightIcao || null, flightIata || flightIcao || '');
     if (config.isDev && !result.position) {
       console.log('[LiveFlightService] Live position unavailable', {
@@ -264,10 +279,6 @@ export class LiveFlightService {
    * parameter, avoiding a full `/states/all` download. Cached per-icao24.
    */
   private async getByIcao24(icao24: string, flightNumberForResult: string): Promise<LiveResolutionResult> {
-    if (config.isDev) {
-      console.log('[LiveFlightService] OpenSky ICAO24 lookup', { icao24 });
-    }
-
     const cached = this.icao24Cache.get(icao24);
     if (cached && Date.now() - cached.timestamp < this.cacheTtlMs) {
       if (config.isDev) {
@@ -309,13 +320,18 @@ export class LiveFlightService {
       const coordsValid = Boolean(match) && isValidCoordinate(match?.[6], match?.[5]);
 
       if (config.isDev) {
-        console.log('[LiveFlightService] OpenSky match', {
-          matched: coordsValid,
-          icao24,
-          callsign: match ? (match[1] || '').trim() : null,
-          latitude: match ? match[6] : null,
-          longitude: match ? match[5] : null,
-        });
+        console.log('[LiveFlight] OpenSky ICAO24 lookup:', icao24);
+        console.log('[LiveFlight] Exact match:', coordsValid ? 'true' : 'false');
+        if (match) {
+          console.log('[LiveFlight] Latitude:', match[6]);
+          console.log('[LiveFlight] Longitude:', match[5]);
+          console.log('[LiveFlight] Last contact:', match[4]);
+          console.log('[LiveFlight] On ground:', match[8]);
+          console.log('[LiveFlight] Callsign:', (match[1] || '').trim());
+          if (match[7] != null) console.log('[LiveFlight] Baro altitude (m):', match[7]);
+          if (match[9] != null) console.log('[LiveFlight] Velocity (m/s):', match[9]);
+          if (match[10] != null) console.log('[LiveFlight] True track (°):', match[10]);
+        }
       }
 
       if (!match || !coordsValid) {
@@ -323,14 +339,22 @@ export class LiveFlightService {
       }
 
       if (!isFresh(match[4])) {
+        const ageSeconds = Math.round(Date.now() / 1000 - (match[4] || 0));
         if (config.isDev) {
-          console.log('[LiveFlightService] OpenSky state is stale - not treating as live', {
-            icao24,
-            lastContact: match[4],
-            ageSeconds: Math.round(Date.now() / 1000 - (match[4] || 0)),
-          });
+          console.log('[LiveFlight] Fresh: false — stale_opensky_position, age:', ageSeconds, 's');
         }
         return { position: null, reason: 'stale_opensky_position', strategy: 'airlabs_icao24' };
+      }
+
+      if (match[8] === true) {
+        if (config.isDev) {
+          console.log('[LiveFlight] Aircraft on ground — not presenting as live airborne position');
+        }
+        return { position: null, reason: 'aircraft_on_ground', strategy: 'airlabs_icao24' };
+      }
+
+      if (config.isDev) {
+        console.log('[LiveFlight] Fresh: true');
       }
 
       return { position: mapStateVectorToPosition(match, flightNumberForResult), reason: null, strategy: 'airlabs_icao24' };
@@ -361,36 +385,53 @@ export class LiveFlightService {
       return { position: null, reason: 'callsign_not_currently_visible', strategy: 'callsign_fallback' };
     }
 
+    if (config.isDev) {
+      console.log(`[LiveFlight] OpenSky callsign fallback: ${normalizedCandidates.join(', ')}`);
+    }
+
     const states = await this.getStates();
 
+    // Exact match only, and the state must carry a real ICAO24 - a state
+    // without one can't be verified as a specific aircraft.
     const match = states.find((s) => {
       const callsign = normalizeCallsign(s[1]);
-      return callsign.length > 0 && normalizedCandidates.includes(callsign);
+      return callsign.length > 0 && normalizedCandidates.includes(callsign) && Boolean(normalizeIcao24(s[0]));
     });
 
     const matchedCallsign = match ? normalizeCallsign(match[1]) : null;
 
     if (config.isDev) {
-      console.log('[LiveFlightService] OpenSky exact callsign lookup', {
-        requestedCallsign: requestedCallsign || normalizedCandidates[0],
-        matchedCallsign,
-        matched: Boolean(match),
-      });
+      console.log(`[LiveFlight] Exact match: ${Boolean(match)}`);
+      if (match) {
+        console.log(`[LiveFlight] Matched callsign: ${matchedCallsign}`);
+        console.log(`[LiveFlight] Latitude: ${match[6]}`);
+        console.log(`[LiveFlight] Longitude: ${match[5]}`);
+        console.log(`[LiveFlight] Last contact: ${match[4]}`);
+        console.log(`[LiveFlight] On ground: ${match[8]}`);
+      }
     }
 
-    if (!match) {
+    if (!match || !isValidCoordinate(match[6], match[5])) {
       return { position: null, reason: 'callsign_not_currently_visible', strategy: 'callsign_fallback' };
     }
 
     if (!isFresh(match[4])) {
+      const ageSeconds = Math.round(Date.now() / 1000 - (match[4] || 0));
       if (config.isDev) {
-        console.log('[LiveFlightService] OpenSky state is stale - not treating as live', {
-          callsign: matchedCallsign,
-          lastContact: match[4],
-          ageSeconds: Math.round(Date.now() / 1000 - (match[4] || 0)),
-        });
+        console.log(`[LiveFlight] Fresh: false — stale_opensky_position, age: ${ageSeconds}s`);
       }
       return { position: null, reason: 'stale_opensky_position', strategy: 'callsign_fallback' };
+    }
+
+    if (match[8] === true) {
+      if (config.isDev) {
+        console.log('[LiveFlight] Aircraft on ground — not presenting as live airborne position');
+      }
+      return { position: null, reason: 'aircraft_on_ground', strategy: 'callsign_fallback' };
+    }
+
+    if (config.isDev) {
+      console.log(`[LiveFlight] Fresh: true`);
     }
 
     return {

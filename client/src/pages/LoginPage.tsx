@@ -39,7 +39,7 @@ export const LoginPage: React.FC = () => {
       await login(email.trim(), password);
       navigate(redirectTo, { replace: true });
     } catch (err: any) {
-      setServerError(err.message || 'Unable to log in. Please try again.');
+      setServerError(err.message || 'Unable to log in. Please check your credentials.');
     } finally {
       setIsSubmitting(false);
     }
@@ -48,19 +48,20 @@ export const LoginPage: React.FC = () => {
   return (
     <Layout>
       <div className="max-w-sm w-full mx-auto p-4 sm:p-6 pt-10 sm:pt-16">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-5">
+        <div className="bg-white border border-slate-200/90 rounded-2xl p-6 sm:p-7 shadow-sm space-y-5">
           <div className="text-center space-y-1.5">
-            <div className="w-11 h-11 rounded-xl bg-cyan-950 border border-cyan-800 flex items-center justify-center text-cyan-400 mx-auto">
-              <LogIn className="w-5 h-5" />
+            <div className="w-12 h-12 rounded-2xl bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-600 mx-auto shadow-2xs">
+              <LogIn className="w-6 h-6" />
             </div>
-            <h1 className="text-lg font-bold text-white">Log in to AeroTrack</h1>
+            <h1 className="text-xl font-bold text-slate-900">Log in to Flight Tracker</h1>
+            <p className="text-xs text-slate-500">Access saved alerts and flight radar</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-cyan-400" />
-                Email
+              <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-sky-600" />
+                Email Address
               </label>
               <input
                 type="email"
@@ -68,13 +69,13 @@ export const LoginPage: React.FC = () => {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 autoComplete="email"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition"
+                className="w-full bg-white border border-slate-300 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none transition shadow-2xs"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" />
+              <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-sky-600" />
                 Password
               </label>
               <input
@@ -83,42 +84,42 @@ export const LoginPage: React.FC = () => {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
                 autoComplete="current-password"
-                className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition"
+                className="w-full bg-white border border-slate-300 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none transition shadow-2xs"
               />
             </div>
 
             {(validationError || serverError) && (
-              <p className="text-xs text-rose-400 bg-rose-950/40 border border-rose-800/60 rounded-lg p-2 font-medium">
+              <div className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3 font-medium">
                 {validationError || serverError}
-              </p>
+              </div>
             )}
 
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-semibold py-2.5 rounded-xl transition-all disabled:opacity-50 text-sm"
+              className="w-full bg-sky-600 hover:bg-sky-700 active:bg-sky-800 text-white font-semibold py-2.5 rounded-xl shadow-2xs transition-all disabled:opacity-50 text-sm"
             >
-              {isSubmitting ? 'Logging in...' : 'Login'}
+              {isSubmitting ? 'Logging in...' : 'Sign In'}
             </button>
 
             <button
               type="button"
               onClick={() => setShowForgotNotice(true)}
-              className="w-full text-xs text-slate-400 hover:text-cyan-400 transition-colors"
+              className="w-full text-xs text-slate-500 hover:text-sky-700 transition-colors"
             >
-              Forgot Password?
+              Forgot password?
             </button>
             {showForgotNotice && (
-              <p className="text-xs text-slate-400 text-center">
-                Password reset isn't available yet. Please contact support.
+              <p className="text-xs text-slate-500 text-center bg-slate-50 p-2 rounded-lg border border-slate-200">
+                Password recovery is currently managed via support.
               </p>
             )}
           </form>
 
-          <p className="text-xs text-slate-400 text-center">
+          <p className="text-xs text-slate-500 text-center pt-1 border-t border-slate-100">
             Don't have an account?{' '}
-            <Link to="/signup" className="text-cyan-400 hover:text-cyan-300 font-medium">
-              Sign Up
+            <Link to="/signup" className="text-sky-600 hover:text-sky-700 font-semibold">
+              Create an account
             </Link>
           </p>
         </div>

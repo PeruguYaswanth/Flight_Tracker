@@ -59,10 +59,14 @@ const endpoint = `${BASE_URL}/api/flights/search?${params.toString()}`;
   public static async getFlightDetails(
     flightNumber: string,
     date?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    route?: { depIata?: string; arrIata?: string }
   ): Promise<Flight> {
     const params = new URLSearchParams();
     if (date) params.append('flightDate', date);
+    // Pins the exact instance being shown (same number can have several).
+    if (route?.depIata) params.append('depIata', route.depIata);
+    if (route?.arrIata) params.append('arrIata', route.arrIata);
 
     const query = params.toString() ? `?${params.toString()}` : '';
 const endpoint = `${BASE_URL}/api/flights/${encodeURIComponent(flightNumber.trim().toUpperCase())}${query}`;

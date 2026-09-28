@@ -2,7 +2,27 @@ import { Request, Response, NextFunction } from 'express';
 import { flightService } from '../services/flightService';
 import { ApiResponse, Flight, FlightSearchQuery } from '../types/flight';
 import { config } from '../config/environment';
-import { filterCurrentlyFlying } from '../services/currentFlightFilter';
+import { collapseCodeshares, filterRelevantFlights } from '../services/currentFlightFilter';
+
+/**
+ * Search-result shaping shared by every search: keep flights that are in
+ * the air, departing soon or recently cancelled, then list each physical
+ * flight once. Logs the counts at each stage (no credentials).
+ */
+function shapeResults(rawFlights: Flight[], tag: 'RouteSearch' | 'FlightSearch', label: string, flightDate?: string): Flight[] {
+  const relevant = filterRelevantFlights(rawFlights);
+  // AirLabs can't be queried by date on this plan. Today (the form default)
+  // means "in the air or departing soon"; any other date keeps only flights
+  // departing on that UTC date - an empty result is the honest answer when
+  // the provider has none for it.
+  const today = new Date().toISOString().slice(0, 10);
+  const dated = flightDate && flightDate !== today ? relevant.filter((f) => f.flightDate === flightDate) : relevant;
+  const flights = collapseCodeshares(dated);
+  if (config.isDev) {
+    console.log(`[${tag}] ${label} | provider results: ${rawFlights.length} | after status/time filter: ${relevant.length} | after date filter: ${dated.length} | after codeshare grouping: ${flights.length}`);
+  }
+  return flights;
+}
 
 export class FlightController {
   /**
@@ -38,15 +58,9 @@ export class FlightController {
       }
 
       const rawFlights = await flightService.searchFlights(query);
-      // Only ever return flight instances that are currently airborne right
-      // now - not yesterday's/tomorrow's records for the same number, and
-      // not ones that have already landed. See currentFlightFilter.ts.
-      const flights = filterCurrentlyFlying(rawFlights);
-
-      if (config.isDev) {
-        console.log(`[FlightController] Provider returned ${rawFlights.length} record(s), ${flights.length} currently flying`);
-        console.log(`[FlightController] Returning ${flights.length} flights to client`);
-      }
+      const flights = query.depIata || query.arrIata
+        ? shapeResults(rawFlights, 'RouteSearch', `Origin: ${query.depIata || '-'} | Destination: ${query.arrIata || '-'} | Date: ${query.flightDate || 'today'}`, query.flightDate)
+        : shapeResults(rawFlights, 'FlightSearch', `Flight: ${query.flightNumber || query.airline} | Date: ${query.flightDate || 'today'}`, query.flightDate);
 
       const response: ApiResponse<Flight[]> = {
         success: true,
@@ -88,12 +102,7 @@ export class FlightController {
       }
 
       const rawFlights = await flightService.searchByRoute(dep, arr, date);
-      const flights = filterCurrentlyFlying(rawFlights);
-
-      if (config.isDev) {
-        console.log(`[FlightController] Provider returned ${rawFlights.length} record(s), ${flights.length} currently flying`);
-        console.log(`[FlightController] Returning ${flights.length} flights to client`);
-      }
+      const flights = shapeResults(rawFlights, 'RouteSearch', `Origin: ${dep} | Destination: ${arr} | Date: ${date || 'today'}`, date);
 
       const response: ApiResponse<Flight[]> = {
         success: true,
@@ -114,7 +123,7 @@ export class FlightController {
   public static async getFlightDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { flightNumber } = req.params;
-      const { flightDate } = req.query;
+      const { flightDate, depIata, arrIata } = req.query;
 
       if (!flightNumber || flightNumber.trim() === '') {
         res.status(400).json({
@@ -127,9 +136,13 @@ export class FlightController {
         return;
       }
 
+      // depIata/arrIata pin the exact instance the page is showing, so a
+      // refresh never swaps in another day's record for the same number.
       const flight = await flightService.getFlightByNumber(
         flightNumber.trim().toUpperCase(),
-        flightDate ? String(flightDate).trim() : undefined
+        flightDate ? String(flightDate).trim() : undefined,
+        depIata ? String(depIata).trim() : undefined,
+        arrIata ? String(arrIata).trim() : undefined
       );
 
       if (!flight) {

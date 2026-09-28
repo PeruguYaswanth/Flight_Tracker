@@ -12,14 +12,14 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
 }) => {
   if (type === 'no-results') {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 flex flex-col items-center justify-center text-center space-y-3 shadow-xl">
-        <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center text-slate-400">
+      <div className="bg-white border border-slate-200/90 rounded-2xl p-8 flex flex-col items-center justify-center text-center space-y-3 shadow-sm">
+        <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
           <Search className="w-6 h-6" />
         </div>
         <div className="space-y-1">
-          <h3 className="text-sm font-semibold text-slate-200">No Matching Flight Found</h3>
-          <p className="text-xs text-slate-400 max-w-xs">
-            {customMessage || 'Please check the flight number, airline, or date and try again.'}
+          <h3 className="text-sm font-bold text-slate-800">No Matching Flights Found</h3>
+          <p className="text-xs text-slate-500 max-w-sm">
+            {customMessage || 'Please verify the flight number, airline, or route and try again.'}
           </p>
         </div>
       </div>
@@ -27,14 +27,14 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   }
 
   return (
-    <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-10 flex flex-col items-center justify-center text-center space-y-4 shadow-xl">
-      <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center">
-        <Plane className="w-7 h-7 text-slate-400 -rotate-45" />
+    <div className="bg-white border border-slate-200/90 rounded-2xl p-10 flex flex-col items-center justify-center text-center space-y-4 shadow-sm">
+      <div className="w-14 h-14 rounded-2xl bg-sky-50 border border-sky-100 flex items-center justify-center">
+        <Plane className="w-7 h-7 text-sky-600 -rotate-45" />
       </div>
       <div className="space-y-1.5">
-        <h3 className="text-sm font-semibold text-slate-200">No Flight Selected</h3>
-        <p className="text-xs text-slate-400 max-w-sm">
-          Search for a flight by number or route above to view live radar position, telemetry, and detailed schedules.
+        <h3 className="text-sm font-bold text-slate-800">Ready to Track Flights</h3>
+        <p className="text-xs text-slate-500 max-w-sm">
+          Search by flight number (e.g. 6E6372, AI101) or by route (e.g. Hyderabad to Delhi) to view live status, schedules, and radar position.
         </p>
       </div>
     </div>

@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { Plane, Radio, RefreshCw, Menu, X, User as UserIcon, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { NotificationBell } from './NotificationBell';
+import { formatDisplayName } from '../utils/formatUser';
 
 interface HeaderProps {
   onRefresh?: () => void;
@@ -11,14 +13,16 @@ interface HeaderProps {
 }
 
 const NAV_LINKS = [
-  { label: 'Flight Status', to: '/flight-status' },
+  { label: 'Search Flights', to: '/flight-status' },
   { label: 'Airports', to: '/airports' },
   { label: 'About', to: '/about' },
 ];
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `text-sm font-medium transition-colors ${
-    isActive ? 'text-cyan-400' : 'text-slate-300 hover:text-white'
+  `text-sm font-semibold transition-colors px-3 py-1.5 rounded-lg ${
+    isActive
+      ? 'text-sky-700 bg-sky-50'
+      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
   }`;
 
 export const Header: React.FC<HeaderProps> = ({
@@ -50,27 +54,27 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="bg-slate-900/90 backdrop-blur border-b border-slate-800 sticky top-0 z-30 px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+    <header className="bg-white/95 backdrop-blur border-b border-slate-200 sticky top-0 z-30 px-4 lg:px-8 py-3 flex flex-wrap items-center justify-between gap-4 shadow-2xs">
       {/* Brand Identity */}
       <Link to="/" className="flex items-center gap-3 shrink-0" onClick={() => setMobileMenuOpen(false)}>
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-lg shadow-cyan-500/20 ring-1 ring-cyan-400/30">
+        <div className="w-10 h-10 rounded-xl bg-sky-600 flex items-center justify-center shadow-sm">
           <Plane className="w-5 h-5 text-white -rotate-45" />
         </div>
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-lg font-bold tracking-tight text-white flex items-center gap-1.5">
-              AEROTRACK
-              <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/60 uppercase">
-                Pro
+            <h1 className="text-lg font-black tracking-tight text-slate-900 flex items-center gap-1.5">
+              Flight Tracker
+              <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 uppercase">
+                PRO
               </span>
             </h1>
           </div>
-          <p className="text-xs text-slate-400 hidden sm:block">Live Global Flight Tracking & Radar Console</p>
+          <p className="text-xs text-slate-500 hidden sm:block">Live Flight Status & Route Tracking</p>
         </div>
       </Link>
 
       {/* Primary Navigation (desktop) */}
-      <nav className="hidden md:flex items-center gap-6">
+      <nav className="hidden md:flex items-center gap-1">
         {NAV_LINKS.map((link) => (
           <NavLink key={link.to} to={link.to} className={navLinkClass}>
             {link.label}
@@ -80,24 +84,24 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Center Status Indicators (Flight Status page only) */}
       {showLiveStatus && (
-        <div className="hidden lg:flex items-center gap-6 text-xs text-slate-300">
-          <div className="flex items-center gap-2 bg-slate-950/60 border border-slate-800/80 px-3 py-1.5 rounded-lg">
-            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            <span className="text-slate-400">Feed Status:</span>
-            <span className="text-emerald-400 font-medium">LIVE</span>
+        <div className="hidden lg:flex items-center gap-4 text-xs text-slate-600">
+          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1 rounded-lg">
+            <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+            <span className="text-slate-500">Radar Feed:</span>
+            <span className="text-emerald-700 font-bold">ONLINE</span>
           </div>
-          <div className="bg-slate-950/60 border border-slate-800/80 px-3 py-1.5 rounded-lg font-mono text-cyan-300">
+          <div className="bg-slate-50 border border-slate-200 px-3 py-1 rounded-lg font-mono font-semibold text-slate-700">
             {time}
           </div>
         </div>
       )}
 
-      {/* Right Controls */}
-      <div className="flex items-center gap-3">
+      {/* Right Controls & Auth */}
+      <div className="flex items-center gap-2.5">
         {lastUpdated && (
-          <div className="hidden sm:flex flex-col text-right text-[11px] text-slate-400 font-mono">
-            <span className="text-slate-500">LAST SYNC</span>
-            <span className="text-slate-300">{new Date(lastUpdated).toLocaleTimeString()}</span>
+          <div className="hidden sm:flex flex-col text-right text-[11px] text-slate-500 font-mono pr-2">
+            <span className="text-slate-400">LAST SYNC</span>
+            <span className="text-slate-700 font-semibold">{new Date(lastUpdated).toLocaleTimeString()}</span>
           </div>
         )}
 
@@ -105,28 +109,30 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onRefresh}
             disabled={isLoading}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/80 transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-all text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs"
             title="Refresh current search"
           >
-            <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 text-sky-600 ${isLoading ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline">Refresh</span>
           </button>
         )}
 
+        <NotificationBell />
+
         {/* Auth Actions (desktop) */}
-        <div className="hidden md:flex items-center gap-2">
+        <div className="hidden md:flex items-center gap-2 pl-1">
           {isAuthenticated ? (
             <>
               <Link
                 to="/profile"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/80 transition-all text-xs font-medium"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 border border-slate-200 transition-all text-xs font-semibold"
               >
-                <UserIcon className="w-3.5 h-3.5 text-cyan-400" />
-                {user?.name?.split(' ')[0] || 'Profile'}
+                <UserIcon className="w-3.5 h-3.5 text-sky-600" />
+                {formatDisplayName(user?.name).split(' ')[0] || 'Profile'}
               </Link>
               <button
                 onClick={handleLogout}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-200 hover:text-rose-300 border border-slate-700/80 hover:border-rose-800/60 transition-all text-xs font-medium"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-50 hover:bg-rose-50 text-slate-700 hover:text-rose-700 border border-slate-200 hover:border-rose-200 transition-all text-xs font-semibold"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 Logout
@@ -136,13 +142,13 @@ export const Header: React.FC<HeaderProps> = ({
             <>
               <Link
                 to="/login"
-                className="px-3.5 py-1.5 rounded-lg text-slate-200 hover:text-white border border-slate-700/80 hover:border-slate-600 transition-all text-xs font-medium"
+                className="px-4 py-1.5 rounded-xl text-slate-700 hover:text-slate-900 hover:bg-slate-50 border border-slate-200 transition-all text-xs font-semibold"
               >
                 Login
               </Link>
               <Link
                 to="/signup"
-                className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-semibold transition-all text-xs shadow-sm"
+                className="px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold transition-all text-xs shadow-sm"
               >
                 Sign Up
               </Link>
@@ -152,7 +158,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Mobile menu toggle */}
         <button
-          className="md:hidden p-2 rounded-lg bg-slate-800 border border-slate-700/80 text-slate-200"
+          className="md:hidden p-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-700"
           onClick={() => setMobileMenuOpen((open) => !open)}
           aria-label="Toggle navigation menu"
         >
@@ -160,17 +166,17 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
       </div>
 
-      {/* Mobile menu panel */}
+      {/* Mobile menu drawer */}
       {mobileMenuOpen && (
-        <div className="w-full md:hidden border-t border-slate-800 pt-3 mt-1 flex flex-col gap-2">
+        <div className="w-full md:hidden border-t border-slate-200 pt-3 mt-1 flex flex-col gap-1.5">
           {NAV_LINKS.map((link) => (
             <NavLink
               key={link.to}
               to={link.to}
               onClick={() => setMobileMenuOpen(false)}
               className={({ isActive }) =>
-                `px-3 py-2 rounded-lg text-sm font-medium ${
-                  isActive ? 'bg-slate-800 text-cyan-400' : 'text-slate-300 hover:bg-slate-800/60'
+                `px-3 py-2 rounded-xl text-sm font-semibold ${
+                  isActive ? 'bg-sky-50 text-sky-700' : 'text-slate-700 hover:bg-slate-50'
                 }`
               }
             >
@@ -178,40 +184,40 @@ export const Header: React.FC<HeaderProps> = ({
             </NavLink>
           ))}
 
-          <div className="border-t border-slate-800 pt-2 mt-1 flex flex-col gap-2">
+          <div className="border-t border-slate-200 pt-3 mt-1 flex flex-col gap-2">
             {isAuthenticated ? (
               <>
                 <Link
                   to="/profile"
                   onClick={() => setMobileMenuOpen(false)}
-                  className="px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/60 flex items-center gap-2"
+                  className="px-3 py-2 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2"
                 >
-                  <UserIcon className="w-4 h-4 text-cyan-400" /> {user?.name || 'Profile'}
+                  <UserIcon className="w-4 h-4 text-sky-600" /> {formatDisplayName(user?.name) || 'Profile'}
                 </Link>
                 <button
                   onClick={handleLogout}
-                  className="px-3 py-2 rounded-lg text-sm font-medium text-rose-300 hover:bg-rose-950/40 flex items-center gap-2 text-left"
+                  className="px-3 py-2 rounded-xl text-sm font-semibold text-rose-700 hover:bg-rose-50 flex items-center gap-2 text-left"
                 >
                   <LogOut className="w-4 h-4" /> Logout
                 </button>
               </>
             ) : (
-              <>
+              <div className="grid grid-cols-2 gap-2 pt-1">
                 <Link
                   to="/login"
                   onClick={() => setMobileMenuOpen(false)}
-                  className="px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/60"
+                  className="px-3 py-2 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-50 border border-slate-200 text-center"
                 >
                   Login
                 </Link>
                 <Link
                   to="/signup"
                   onClick={() => setMobileMenuOpen(false)}
-                  className="px-3 py-2 rounded-lg text-sm font-semibold bg-cyan-500 text-slate-950 text-center"
+                  className="px-3 py-2 rounded-xl text-sm font-semibold bg-sky-600 text-white text-center shadow-sm"
                 >
                   Sign Up
                 </Link>
-              </>
+              </div>
             )}
           </div>
         </div>

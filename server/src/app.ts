@@ -7,6 +7,8 @@ import flightRoutes from './routes/flightRoutes';
 import authRoutes from './routes/authRoutes';
 import airportRoutes from './routes/airportRoutes';
 import liveFlightRoutes from './routes/liveFlightRoutes';
+import notificationRoutes from './routes/notificationRoutes';
+import trackedFlightRoutes from './routes/trackedFlightRoutes';
 
 const app = express();
 
@@ -18,7 +20,7 @@ app.use(helmet({
 // CORS configuration
 app.use(cors({
   origin: config.corsOrigin,
-  methods: ['GET', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
@@ -90,6 +92,25 @@ const liveFlightLimiter = rateLimit({
   },
 });
 app.use('/api/live-flights', liveFlightLimiter, liveFlightRoutes);
+
+// Flight notifications & tracked flights (per-user, requires login). The
+// client polls roughly every 90s; tracked-flight checks reuse the cached
+// AirLabs search, so this limiter is about request volume, not quota.
+const notificationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 150,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: 'Notification request limit reached. Please try again later.',
+    },
+  },
+});
+app.use('/api/notifications', notificationLimiter, notificationRoutes);
+app.use('/api/tracked-flights', notificationLimiter, trackedFlightRoutes);
 
 // 404 handler for undefined routes
 app.use((req: Request, res: Response) => {

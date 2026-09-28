@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, MapPin, PlaneTakeoff, PlaneLanding } from 'lucide-react';
+import { ArrowLeft, PlaneTakeoff, PlaneLanding, Building2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { LoadingState } from '../components/LoadingState';
 import { ErrorState } from '../components/ErrorState';
@@ -44,38 +44,51 @@ export const AirportDetailPage: React.FC = () => {
       <div className="max-w-5xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
         <button
           onClick={() => navigate('/airports')}
-          className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-cyan-400 transition-colors"
+          className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 hover:text-sky-700 transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to airports
+          <span>Back to Airports Directory</span>
         </button>
 
-        {isLoading && <LoadingState message="Loading airport information..." />}
+        {isLoading && <LoadingState message="Loading airport schedule data..." />}
 
         {!isLoading && errorMessage && <ErrorState message={errorMessage} />}
 
         {!isLoading && !errorMessage && details && (
-          <>
-            <div className="flex items-start gap-3">
-              <div className="w-12 h-12 rounded-xl bg-cyan-950 border border-cyan-800 flex items-center justify-center text-cyan-400 shrink-0">
-                <MapPin className="w-6 h-6" />
+          <div className="space-y-6">
+            {/* Header Airport Overview Card */}
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-2xs flex items-start gap-4">
+              <div className="w-14 h-14 rounded-2xl bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-700 font-bold shrink-0">
+                <Building2 className="w-7 h-7" />
               </div>
-              <div>
-                <div className="text-xs font-mono font-bold text-cyan-400">{details.airport.iata}</div>
-                <h1 className="text-xl font-bold text-white">{details.airport.name}</h1>
-                <p className="text-sm text-slate-400">{details.airport.city}, {details.airport.country}</p>
+              <div className="space-y-1">
+                <div className="text-xs font-mono font-bold text-sky-700 bg-sky-50 px-2.5 py-0.5 rounded inline-block border border-sky-200">
+                  {details.airport.iata}
+                </div>
+                <h1 className="text-2xl font-black text-slate-900">{details.airport.name}</h1>
+                <p className="text-sm text-slate-600 font-medium">
+                  {details.airport.city}, {details.airport.country} · Coords: {details.airport.lat.toFixed(4)}°, {details.airport.lng.toFixed(4)}°
+                </p>
               </div>
             </div>
 
+            {/* Departures and Arrivals Boards */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Departures Column */}
               <section className="space-y-3">
-                <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300 flex items-center gap-2">
-                  <PlaneTakeoff className="w-4 h-4 text-cyan-400" />
-                  Departures ({details.departures.length})
-                </h2>
-                <div className="space-y-2.5 max-h-[560px] overflow-y-auto pr-1">
+                <div className="bg-white border border-slate-200/90 rounded-2xl p-4 flex items-center justify-between shadow-2xs">
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-2">
+                    <PlaneTakeoff className="w-4 h-4 text-sky-600" />
+                    Departures ({details.departures.length})
+                  </h2>
+                  <span className="text-xs font-semibold text-slate-500">Scheduled/Active</span>
+                </div>
+
+                <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
                   {details.departures.length === 0 && (
-                    <p className="text-xs text-slate-500">No departure information available.</p>
+                    <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-xs text-slate-500 font-medium">
+                      No departure flights currently scheduled.
+                    </div>
                   )}
                   {details.departures.map((flight) => (
                     <FlightCard key={flight.id} flight={flight} isSelected={false} onSelect={goToFlight} />
@@ -83,14 +96,21 @@ export const AirportDetailPage: React.FC = () => {
                 </div>
               </section>
 
+              {/* Arrivals Column */}
               <section className="space-y-3">
-                <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300 flex items-center gap-2">
-                  <PlaneLanding className="w-4 h-4 text-emerald-400" />
-                  Arrivals ({details.arrivals.length})
-                </h2>
-                <div className="space-y-2.5 max-h-[560px] overflow-y-auto pr-1">
+                <div className="bg-white border border-slate-200/90 rounded-2xl p-4 flex items-center justify-between shadow-2xs">
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-2">
+                    <PlaneLanding className="w-4 h-4 text-emerald-600" />
+                    Arrivals ({details.arrivals.length})
+                  </h2>
+                  <span className="text-xs font-semibold text-slate-500">Scheduled/Active</span>
+                </div>
+
+                <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
                   {details.arrivals.length === 0 && (
-                    <p className="text-xs text-slate-500">No arrival information available.</p>
+                    <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-xs text-slate-500 font-medium">
+                      No arrival flights currently scheduled.
+                    </div>
                   )}
                   {details.arrivals.map((flight) => (
                     <FlightCard key={flight.id} flight={flight} isSelected={false} onSelect={goToFlight} />
@@ -98,7 +118,7 @@ export const AirportDetailPage: React.FC = () => {
                 </div>
               </section>
             </div>
-          </>
+          </div>
         )}
       </div>
     </Layout>

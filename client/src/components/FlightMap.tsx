@@ -6,6 +6,8 @@ import { Radio, AlertCircle } from 'lucide-react';
 
 interface FlightMapProps {
   selectedFlight: Flight | null;
+  /** Why no live position is available, when the backend said so. */
+  liveUnavailableMessage?: string | null;
 }
 
 /**
@@ -22,16 +24,10 @@ function isValidCoordinate(lat: unknown, lng: unknown): boolean {
   );
 }
 
-export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
+export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavailableMessage }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
-  // The aircraft marker lives outside `layerGroupRef` (which the
-  // dep/arr/route effect below clears and rebuilds on every flight change)
-  // so that a fresh live-position poll can move it in place via
-  // `setLatLng`/`setIcon` instead of tearing down and re-adding it - which
-  // would otherwise also force an unwanted `fitBounds` re-animation every
-  // poll.
   const aircraftMarkerRef = useRef<L.Marker | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
@@ -39,14 +35,6 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    // Defensive guard: React 18 StrictMode (dev only) mounts every effect
-    // twice (mount -> cleanup -> mount again). Verified directly (mounting
-    // this component through a real createRoot+StrictMode tree) that
-    // Leaflet 1.9.4's map.remove() already clears the `_leaflet_id` stamp
-    // it sets on the container, so the second mount does NOT throw "Map
-    // container is already initialized." in practice - but clearing any
-    // stray stamp before init is a harmless, zero-cost safety net against
-    // that well-known class of bug regardless.
     const container = mapContainerRef.current as HTMLDivElement & { _leaflet_id?: number };
     if (container._leaflet_id) {
       delete container._leaflet_id;
@@ -54,23 +42,10 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
 
     let map: L.Map;
     try {
-      // Default center (World view). fadeAnimation disabled: Leaflet's
-      // tile/zoom fade-in is driven entirely by a recursive
-      // requestAnimationFrame loop that interpolates each tile's opacity
-      // from 0 to 1 over ~200ms (see leaflet-src.js _updateOpacity). If
-      // that RAF loop doesn't run to completion for any reason, tiles are
-      // left permanently stuck at inline `opacity: 0` - which no CSS rule
-      // can override. Confirmed exactly this via a real headless Chrome
-      // capture: tiles had `leaflet-tile-loaded` (genuinely loaded) but
-      // `style="opacity: 0"` forever. Disabling the animation removes this
-      // entire failure mode - tiles simply appear at full opacity the
-      // instant they load, with no dependency on animation-frame timing.
       map = L.map(container, {
         center: [20.5937, 78.9629],
         zoom: 4,
         zoomControl: false,
-        // Attribution is required by the tile provider's usage terms - see
-        // the tile layer below for why this can no longer be disabled.
         attributionControl: true,
         fadeAnimation: false,
       });
@@ -80,34 +55,17 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       return;
     }
 
-    // Base tiles. NOT api.tile.openstreetmap.org: that endpoint is reserved
-    // for light/casual use per OSM's tile usage policy and actively blocks
-    // non-compliant clients by serving a small "418 Access Blocked" notice
-    // image in place of real tiles - confirmed directly (fetched the tile
-    // URL and inspected the actual PNG content) as the reason the map
-    // looked blank. CyclOSM's community tile service explicitly allows
-    // this kind of third-party app usage and was verified working the
-    // same way (fetched and inspected real tile content) before switching.
     L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png', {
       maxZoom: 20,
       subdomains: ['a', 'b', 'c'],
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles by <a href="https://www.cyclosm.org">CyclOSM</a>',
     }).addTo(map);
 
-    // Layer group for dynamic items (pins, aircraft, polylines)
     const layerGroup = L.layerGroup().addTo(map);
     layerGroupRef.current = layerGroup;
     mapInstanceRef.current = map;
     setMapReady(true);
 
-    // Leaflet measures its container's pixel size at init time to compute
-    // tile positions. If that size isn't settled yet (CSS/webfonts/layout
-    // still resolving right as this panel mounts, min-height-only parents,
-    // etc.), tiles and markers can end up positioned outside the visible
-    // area - a container that LOOKS empty even though Leaflet "succeeded".
-    // A ResizeObserver re-measures whenever the container's actual size
-    // changes (fires once immediately with the current size, then again
-    // only on real changes) - not a continuous per-render resize loop.
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
       resizeObserver = new ResizeObserver(() => {
@@ -115,8 +73,6 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       });
       resizeObserver.observe(container);
     } else {
-      // Fallback for an environment without ResizeObserver: one deferred
-      // correction after initial layout should have settled.
       window.setTimeout(() => map.invalidateSize(), 100);
     }
 
@@ -130,10 +86,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
     };
   }, []);
 
-  // Redraw the departure/arrival pins, route line, and fit the view. Keyed
-  // on the flight's identity and its static geography - NOT on `live` - so
-  // a live-position poll (every 60s) never tears down and refits the whole
-  // map. That is handled separately, below.
+  // Redraw departure/arrival pins, route line, and fit bounds
   useEffect(() => {
     const map = mapInstanceRef.current;
     const layerGroup = layerGroupRef.current;
@@ -156,21 +109,21 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       const depIcon = L.divIcon({
         className: 'custom-dep-pin',
         html: `
-          <div style="background: #0f172a; border: 2px solid #00f0ff; color: #00f0ff; border-radius: 9999px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px; font-family: monospace; box-shadow: 0 0 14px rgba(0,240,255,0.45);">
+          <div style="background: #0284c7; border: 2.5px solid #ffffff; color: #ffffff; border-radius: 9999px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; font-family: monospace; box-shadow: 0 4px 12px rgba(2,132,199,0.5);">
             ${departure.iata || 'DEP'}
           </div>
         `,
-        iconSize: [34, 34],
-        iconAnchor: [17, 17],
+        iconSize: [36, 36],
+        iconAnchor: [18, 18],
       });
 
       const depMarker = L.marker(depLatLng, { icon: depIcon });
       depMarker.bindPopup(`
         <div style="font-family: sans-serif; font-size: 12px;">
-          <div style="color: #00f0ff; font-weight: 700; margin-bottom: 2px;">ORIGIN: ${departure.iata}</div>
-          <div style="font-weight: 600; color: #fff;">${departure.name}</div>
+          <div style="color: #38bdf8; font-weight: 800; font-size: 13px; margin-bottom: 2px;">ORIGIN: ${departure.iata}</div>
+          <div style="font-weight: 600; color: #ffffff;">${departure.name}</div>
           <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${departure.city || ''}${departure.country ? ', ' + departure.country : ''}</div>
-          ${departure.terminal ? `<div style="color: #cbd5e1; font-size: 11px; margin-top: 2px;">Terminal: ${departure.terminal} ${departure.gate ? `| Gate: ${departure.gate}` : ''}</div>` : ''}
+          ${departure.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${departure.terminal} ${departure.gate ? `| Gate: ${departure.gate}` : ''}</div>` : ''}
         </div>
       `);
       layerGroup.addLayer(depMarker);
@@ -184,32 +137,32 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       const arrIcon = L.divIcon({
         className: 'custom-arr-pin',
         html: `
-          <div style="background: #0f172a; border: 2px solid #10b981; color: #10b981; border-radius: 9999px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px; font-family: monospace; box-shadow: 0 0 14px rgba(16,185,129,0.45);">
+          <div style="background: #059669; border: 2.5px solid #ffffff; color: #ffffff; border-radius: 9999px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; font-family: monospace; box-shadow: 0 4px 12px rgba(5,150,105,0.5);">
             ${arrival.iata || 'ARR'}
           </div>
         `,
-        iconSize: [34, 34],
-        iconAnchor: [17, 17],
+        iconSize: [36, 36],
+        iconAnchor: [18, 18],
       });
 
       const arrMarker = L.marker(arrLatLng, { icon: arrIcon });
       arrMarker.bindPopup(`
         <div style="font-family: sans-serif; font-size: 12px;">
-          <div style="color: #10b981; font-weight: 700; margin-bottom: 2px;">DESTINATION: ${arrival.iata}</div>
-          <div style="font-weight: 600; color: #fff;">${arrival.name}</div>
+          <div style="color: #34d399; font-weight: 800; font-size: 13px; margin-bottom: 2px;">DESTINATION: ${arrival.iata}</div>
+          <div style="font-weight: 600; color: #ffffff;">${arrival.name}</div>
           <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${arrival.city || ''}${arrival.country ? ', ' + arrival.country : ''}</div>
-          ${arrival.terminal ? `<div style="color: #cbd5e1; font-size: 11px; margin-top: 2px;">Terminal: ${arrival.terminal} ${arrival.gate ? `| Gate: ${arrival.gate}` : ''}</div>` : ''}
+          ${arrival.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${arrival.terminal} ${arrival.gate ? `| Gate: ${arrival.gate}` : ''}</div>` : ''}
         </div>
       `);
       layerGroup.addLayer(arrMarker);
     }
 
-    // 3. Flight Route Line (if coordinates available)
+    // 3. Flight Route Polyline
     if (route && route.length > 0) {
       const polyline = L.polyline(route, {
-        color: '#00f0ff',
-        weight: 3,
-        opacity: 0.75,
+        color: '#0284c7',
+        weight: 3.5,
+        opacity: 0.85,
         dashArray: selectedFlight.hasLiveTracking ? '6, 8' : undefined,
         lineCap: 'round',
         lineJoin: 'round',
@@ -217,15 +170,10 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       layerGroup.addLayer(polyline);
     }
 
-    // The aircraft marker itself is created/updated by the effect below,
-    // keyed on `live` alone - this only needs its coordinates (when
-    // present) so the initial fit includes the aircraft, not just the
-    // airports.
     if (live && isValidCoordinate(live.latitude, live.longitude)) {
       boundsPoints.push(L.latLng(live.latitude, live.longitude));
     }
 
-    // Fit bounds smoothly to encapsulate the flight path
     if (boundsPoints.length > 0) {
       const bounds = L.latLngBounds(boundsPoints);
       map.fitBounds(bounds, {
@@ -234,7 +182,6 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
         animate: true,
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     selectedFlight?.flightNumber,
     selectedFlight?.departure.latitude,
@@ -245,10 +192,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
     mapReady,
   ]);
 
-  // Create/move the aircraft marker in place as fresh live-position polls
-  // arrive, without touching the departure/arrival pins, the route line, or
-  // the map's viewport (no `fitBounds` here) - per the requirement that a
-  // live update must move the existing marker, not redraw the map.
+  // Handle live aircraft marker update
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !mapReady) return;
@@ -269,46 +213,57 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
     const aircraftIcon = L.divIcon({
       className: 'custom-aircraft-marker',
       html: `
-        <div style="position: relative; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;">
-          <div style="position: absolute; width: 42px; height: 42px; border-radius: 9999px; background: rgba(0, 240, 255, 0.2); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-          <div style="transform: rotate(${heading}deg); transition: transform 0.5s ease-out; width: 36px; height: 36px; background: #00f0ff; border: 2px solid #ffffff; border-radius: 9999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px #00f0ff;">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="#0b132b" stroke="#0b132b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;">
+          <div style="position: absolute; width: 44px; height: 44px; border-radius: 9999px; background: rgba(56, 189, 248, 0.25); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+          <div style="transform: rotate(${heading}deg); transition: transform 0.5s ease-out; width: 38px; height: 38px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 9999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(56, 189, 248, 0.7);">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="#ffffff" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
             </svg>
           </div>
         </div>
       `,
-      iconSize: [44, 44],
-      iconAnchor: [22, 22],
+      iconSize: [48, 48],
+      iconAnchor: [24, 24],
     });
 
+    // Only fields the provider actually returned are shown.
+    const rows: Array<[string, string]> = [];
+    if (typeof live.altitude === 'number') rows.push(['Altitude', `${live.altitude.toLocaleString()} ft`]);
+    if (typeof live.speed === 'number') rows.push(['Speed', `${live.speed} km/h`]);
+    if (typeof live.heading === 'number') rows.push(['Heading', `${live.heading}°`]);
+    rows.push(['Status', live.isGround ? 'On Ground' : 'Airborne']);
+    const ageSeconds = live.updatedAt ? Math.max(0, Math.round((Date.now() - new Date(live.updatedAt).getTime()) / 1000)) : null;
+    const sourceLabel = live.source === 'airlabs' ? 'AirLabs ADS-B' : live.source === 'opensky' ? 'OpenSky Network' : null;
+    const footer = [sourceLabel, ageSeconds !== null ? `updated ${ageSeconds < 60 ? `${ageSeconds}s` : `${Math.round(ageSeconds / 60)} min`} ago` : null]
+      .filter(Boolean)
+      .join(' · ');
+
     const tooltipHtml = `
-      <div style="font-family: sans-serif; font-size: 12px;">
-        <div style="font-weight: 700; color: #00f0ff; font-size: 13px; font-family: monospace;">&#9992; ${selectedFlight?.flightNumber ?? ''}</div>
-        <hr style="border: 0; border-top: 1px solid #334155; margin: 6px 0;" />
-        <div style="color: #64748b;">Current Position:</div>
-        <div style="color: #f8fafc; margin-bottom: 4px;">${live.latitude.toFixed(4)}, ${live.longitude.toFixed(4)}</div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-          <div><span style="color: #64748b;">Altitude:</span> <b style="color: #f8fafc;">${live.altitude ? live.altitude.toLocaleString() + ' ft' : 'N/A'}</b></div>
-          <div><span style="color: #64748b;">Speed:</span> <b style="color: #f8fafc;">${live.speed ? live.speed + ' km/h' : 'N/A'}</b></div>
-          <div><span style="color: #64748b;">Heading:</span> <b style="color: #f8fafc;">${live.heading != null ? live.heading + '°' : 'N/A'}</b></div>
+      <div style="font-family: sans-serif; font-size: 12px; min-width: 170px;">
+        <div style="font-weight: 800; color: #38bdf8; font-size: 13px; font-family: monospace; display: flex; align-items: center; gap: 4px;">
+          <span>&#9992;</span> ${selectedFlight?.flightNumber ?? ''}
         </div>
+        <hr style="border: 0; border-top: 1px solid #334155; margin: 6px 0;" />
+        <div style="color: #94a3b8; font-size: 11px;">Current Coordinates:</div>
+        <div style="color: #f8fafc; font-family: monospace; font-weight: 700; margin-bottom: 4px;">
+          ${live.latitude.toFixed(4)}°, ${live.longitude.toFixed(4)}°
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; margin-top: 4px;">
+          ${rows.map(([k, v]) => `<div><span style="color: #94a3b8;">${k}:</span> <b style="color: ${k === 'Status' ? '#34d399' : '#f8fafc'};">${v}</b></div>`).join('')}
+        </div>
+        ${footer ? `<div style="color: #64748b; font-size: 10px; margin-top: 6px;">${footer}</div>` : ''}
       </div>
     `;
 
     if (aircraftMarkerRef.current) {
-      // Already showing this flight's marker - move it and refresh its
-      // icon/tooltip in place instead of recreating it.
       aircraftMarkerRef.current.setLatLng(planeLatLng);
       aircraftMarkerRef.current.setIcon(aircraftIcon);
       aircraftMarkerRef.current.setTooltipContent(tooltipHtml);
     } else {
       const planeMarker = L.marker(planeLatLng, { icon: aircraftIcon, zIndexOffset: 1000 });
-      // Hover, not click: bindTooltip shows on mouseover/mouseout, unlike
-      // bindPopup (click-triggered) used for the airport pins above.
       planeMarker.bindTooltip(tooltipHtml, {
         direction: 'top',
-        offset: [0, -22],
+        offset: [0, -24],
         opacity: 1,
         className: 'aircraft-tooltip',
       });
@@ -317,7 +272,6 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
     }
   }, [selectedFlight?.live, selectedFlight?.flightNumber, mapReady]);
 
-  // Controls Handlers
   const handleZoomIn = () => {
     mapInstanceRef.current?.zoomIn();
   };
@@ -357,21 +311,14 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
     }
   };
 
-  const hasAircraftPosition = !!(
+  const hasAircraftPosition = Boolean(
     selectedFlight?.live && isValidCoordinate(selectedFlight.live.latitude, selectedFlight.live.longitude)
   );
 
-  const hasRoute = !!(selectedFlight?.route && selectedFlight.route.length > 0);
+  const hasRoute = Boolean(selectedFlight?.route && selectedFlight.route.length > 0);
 
   return (
-    <div className="relative w-full h-[380px] lg:h-[500px] rounded-2xl overflow-hidden border border-slate-800 bg-slate-950 shadow-2xl">
-      {/* Map DOM Target - explicit height, not h-full/percentage: confirmed
-          via a real browser measurement (getBoundingClientRect) that this
-          card's parent chain does not establish a definite height, so a
-          percentage height here was resolving to 0px at Leaflet init time
-          - tiles loaded and were positioned, but into a zero-height
-          viewport, i.e. nothing visible. An explicit height has no such
-          dependency. */}
+    <div className="relative w-full h-[380px] lg:h-[480px] rounded-2xl overflow-hidden border border-slate-200 bg-slate-950 shadow-sm">
       <div ref={mapContainerRef} className="w-full h-full z-10" />
 
       {/* Map Controls */}
@@ -385,23 +332,26 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight }) => {
       />
 
       {/* Top-Left Radar Status Badge */}
-      <div className="absolute left-4 top-4 z-[1000] flex items-center gap-2 bg-slate-900/90 backdrop-blur border border-slate-800 px-3 py-1.5 rounded-xl shadow-xl">
-        <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-        <span className="text-xs font-mono font-medium text-slate-200">
+      <div className="absolute left-4 top-4 z-[1000] flex items-center gap-2 bg-slate-900/90 backdrop-blur border border-slate-700 px-3.5 py-1.5 rounded-xl shadow-xl text-white">
+        <Radio className="w-3.5 h-3.5 text-sky-400 animate-pulse" />
+        <span className="text-xs font-mono font-bold tracking-wider">
           {selectedFlight ? `RADAR // ${selectedFlight.flightNumber}` : 'RADAR // GLOBAL MAP'}
         </span>
         {selectedFlight && hasAircraftPosition && (
-          <span className="text-[10px] font-mono font-semibold text-emerald-400 border-l border-slate-700 pl-2 ml-1">
-            LIVE POSITION AVAILABLE
+          <span className="text-[10px] font-mono font-bold text-emerald-400 border-l border-slate-700 pl-2 ml-1">
+            LIVE ADS-B ACTIVE
           </span>
         )}
       </div>
 
       {/* Notice Banner when Live Tracking Coordinates are Unavailable */}
       {selectedFlight && !hasAircraftPosition && (
-        <div className="absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 z-[1000] max-w-sm bg-slate-900/95 backdrop-blur border border-amber-500/40 rounded-xl p-3 shadow-2xl flex items-center gap-2.5 text-xs text-amber-300">
-          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-          <span>Live position is currently unavailable for this flight.</span>
+        <div className="absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 z-[1000] max-w-sm bg-slate-900/95 backdrop-blur border border-slate-700 rounded-xl p-3 shadow-2xl flex items-center gap-2.5 text-xs text-slate-300">
+          <AlertCircle className="w-4 h-4 text-sky-400 shrink-0" />
+          <span>
+            <b className="text-slate-100">Live position unavailable</b>
+            {liveUnavailableMessage ? ` - ${liveUnavailableMessage}` : ''}
+          </span>
         </div>
       )}
     </div>

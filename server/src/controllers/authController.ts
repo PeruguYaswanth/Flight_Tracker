@@ -1,15 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { authService } from '../services/authService';
+import { getBearerToken as getToken } from '../middleware/requireAuth';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function getToken(req: Request): string | null {
-  const header = req.headers.authorization;
-  if (header && header.startsWith('Bearer ')) {
-    return header.slice(7).trim();
-  }
-  return null;
-}
 
 export class AuthController {
   /**

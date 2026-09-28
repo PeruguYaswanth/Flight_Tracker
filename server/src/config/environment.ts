@@ -21,5 +21,19 @@ export const config = {
   openskyClientSecret: process.env.OPENSKY_CLIENT_SECRET || '',
   openskyAuthUrl: process.env.OPENSKY_AUTH_URL || 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '10000', 10),
+  // When OpenSky has no state for an aircraft, AirLabs' position for the
+  // same hex is used - but only from a lookup at most this old, so a cached
+  // record is never shown as the current position.
+  airLabsPositionMaxAgeMs: parseInt(process.env.AIRLABS_POSITION_MAX_AGE_MS || '120000', 10),
+  // Flight notifications. A tracked flight is re-checked at most this often,
+  // and only when its owner's client polls - the check goes through
+  // flightService's existing 10-minute AirLabs cache, so it adds no
+  // upstream calls inside that window.
+  trackedFlightCheckIntervalMs: parseInt(process.env.TRACKED_FLIGHT_CHECK_INTERVAL_MS || '120000', 10),
+  // Departure/arrival estimate shifts smaller than this are ignored, so
+  // provider jitter (14:00 -> 14:02) never becomes a notification.
+  notifyTimeChangeThresholdMinutes: parseInt(process.env.NOTIFY_TIME_CHANGE_THRESHOLD_MINUTES || '15', 10),
+  maxTrackedFlightsPerUser: parseInt(process.env.MAX_TRACKED_FLIGHTS_PER_USER || '20', 10),
+  maxNotificationsPerUser: parseInt(process.env.MAX_NOTIFICATIONS_PER_USER || '100', 10),
   isDev: (process.env.NODE_ENV || 'development') === 'development',
 };
