@@ -1,7 +1,8 @@
 import { ApiResponse } from '../types/flight';
 import { FlightNotification, TrackedFlight } from '../types/notification';
+import { API_BASE_URL } from './apiBase';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const BASE_URL = API_BASE_URL;
 
 export interface NotificationsPayload {
   notifications: FlightNotification[];

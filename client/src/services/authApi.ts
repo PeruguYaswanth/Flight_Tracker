@@ -1,7 +1,8 @@
 import { ApiResponse } from '../types/flight';
 import { AuthResponse, User } from '../types/auth';
+import { API_BASE_URL } from './apiBase';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const BASE_URL = API_BASE_URL;
 
 async function parseOrThrow<T>(response: Response, fallbackMessage: string): Promise<T> {
   const data: ApiResponse<T> = await response.json();

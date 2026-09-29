@@ -1,3 +1,5 @@
+import { API_BASE_URL } from './apiBase';
+
 export type LiveReason =
   | 'NO_IDENTIFIER'
   | 'NO_MATCH'
@@ -94,7 +96,7 @@ export interface LiveLookupParams {
   arrIata?: string | null;
 }
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const BASE_URL = API_BASE_URL;
 
 export class LiveFlightApiClient {
   /**
