@@ -1,11 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Plane, MapPin, X, Check } from 'lucide-react';
-import {
-  AirportRecord,
-  searchAirports,
-  formatAirportDisplay,
-  resolveToIata,
-} from '../data/airportDatabase';
+import { searchAirports, resolveToIata } from '../data/airportDatabase';
+import { AirportApiClient } from '../services/airportApi';
+import { formatCountry } from '../utils/formatCountry';
+
+/** One suggestion row - from the local table or the flight-data provider. */
+interface Suggestion {
+  iata: string;
+  name: string;
+  city: string | null;
+  country: string | null;
+}
+
+// Provider suggestions are fetched when the local table has few matches.
+const REMOTE_MIN_CHARS = 3;
+const REMOTE_WHEN_LOCAL_BELOW = 6;
+const REMOTE_DEBOUNCE_MS = 350;
+const MAX_SUGGESTIONS = 8;
 
 interface AirportAutocompleteProps {
   label: string;
@@ -31,7 +42,7 @@ export const AirportAutocomplete: React.FC<AirportAutocompleteProps> = ({
   className = '',
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [suggestions, setSuggestions] = useState<AirportRecord[]>([]);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -44,14 +55,35 @@ export const AirportAutocomplete: React.FC<AirportAutocompleteProps> = ({
       return;
     }
 
-    // Strip bracketed IATA code if searching after selection
-    const cleanQuery = value.replace(/\s*\([A-Za-z]{3}\)\s*$/, '').trim();
-    if (cleanQuery.length > 0) {
-      const results = searchAirports(cleanQuery, 6);
-      setSuggestions(results);
-    } else {
-      setSuggestions([]);
-    }
+    // A completed selection ("Pune (PNQ)") needs no new suggestions.
+    if (/\([A-Za-z0-9]{3}\)\s*$/.test(value)) return;
+
+    const cleanQuery = value.trim();
+    const local: Suggestion[] = searchAirports(cleanQuery, MAX_SUGGESTIONS).map((a) => ({
+      iata: a.iata, name: a.name, city: a.city, country: a.country,
+    }));
+    setSuggestions(local);
+    if (cleanQuery.length < REMOTE_MIN_CHARS || local.length >= REMOTE_WHEN_LOCAL_BELOW) return;
+
+    // Every other real airport comes from the provider (debounced, cancellable).
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const remote = await AirportApiClient.searchAirports(cleanQuery, controller.signal);
+        const merged = new Map(local.map((a) => [a.iata, a]));
+        for (const a of remote) {
+          // Flight search needs an IATA code; ICAO-only airfields are listed in the Airports section.
+          if (a.iata && !merged.has(a.iata)) merged.set(a.iata, { iata: a.iata, name: a.name || a.iata, city: a.city, country: a.country });
+        }
+        setSuggestions(Array.from(merged.values()).slice(0, MAX_SUGGESTIONS));
+      } catch {
+        // Offline/provider down: local suggestions remain.
+      }
+    }, REMOTE_DEBOUNCE_MS);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
   }, [value]);
 
   // Click outside listener to close dropdown
@@ -68,14 +100,17 @@ export const AirportAutocomplete: React.FC<AirportAutocompleteProps> = ({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const text = e.target.value;
-    const resolvedIata = resolveToIata(text);
-    onChange(text, resolvedIata);
+    // Typing never locks in a code (typing "Goa" must not become GOA, Genoa):
+    // a code is set by picking a suggestion, and free text is resolved on
+    // search. Only an exact "City (XXX)" selection string carries its code.
+    const picked = /\(([A-Za-z0-9]{3})\)\s*$/.test(text) ? resolveToIata(text) : null;
+    onChange(text, picked);
     setIsOpen(true);
     setHighlightedIndex(0);
   };
 
-  const handleSelect = (airport: AirportRecord) => {
-    const formatted = formatAirportDisplay(airport);
+  const handleSelect = (airport: Suggestion) => {
+    const formatted = `${airport.city || airport.name} (${airport.iata})`;
     onChange(formatted, airport.iata);
     setIsOpen(false);
     setHighlightedIndex(-1);
@@ -191,9 +226,9 @@ export const AirportAutocomplete: React.FC<AirportAutocompleteProps> = ({
                 <div className="space-y-0.5 min-w-0">
                   <div className="flex items-center gap-1.5">
                     <span className="font-bold text-sm text-slate-900 leading-snug">
-                      {airport.city}
+                      {airport.city || airport.name}
                     </span>
-                    <span className="text-xs text-slate-500">· {airport.country}</span>
+                    {airport.country && <span className="text-xs text-slate-500">· {formatCountry(airport.country)}</span>}
                   </div>
                   <div className="text-xs text-slate-500 truncate max-w-[280px] sm:max-w-sm flex items-center gap-1">
                     <Plane className="w-3 h-3 text-slate-400 shrink-0 rotate-45" />

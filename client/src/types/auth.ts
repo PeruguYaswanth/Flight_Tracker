@@ -4,7 +4,7 @@ export interface User {
   email: string;
 }
 
+/** The session itself is an HttpOnly cookie; the body only says who signed in. */
 export interface AuthResponse {
-  token: string;
   user: User;
 }

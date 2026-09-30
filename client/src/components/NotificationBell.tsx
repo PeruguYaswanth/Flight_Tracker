@@ -22,6 +22,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
 import { FlightNotification, NotificationEventType } from '../types/notification';
 import { FlightStatusBadge } from './FlightStatusBadge';
+import { flightDetailsPath, flightPathFromKey } from '../utils/flightLinks';
 
 type Tab = 'alerts' | 'tracked';
 
@@ -120,7 +121,7 @@ export const NotificationBell: React.FC = () => {
 
   const openNotification = (n: FlightNotification) => {
     if (!n.read) markRead(n.id);
-    navigate(`/flight/${encodeURIComponent(n.flightNumber)}`);
+    navigate(flightPathFromKey(n.flightNumber, n.flightKey));
   };
 
   const handleUntrack = async (id: string) => {
@@ -241,7 +242,7 @@ export const NotificationBell: React.FC = () => {
               </div>
               <div className="flex gap-2">
                 <Link
-                  to={`/flight/${encodeURIComponent(t.flightNumber)}`}
+                  to={flightDetailsPath(t.flightNumber, { date: t.flightDate, dep: t.origin, arr: t.destination })}
                   className="flex-1 text-center px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1"
                 >
                   View Flight

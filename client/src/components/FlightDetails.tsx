@@ -11,33 +11,27 @@ import {
   AlertCircle,
   Building2,
   CheckCircle2,
+  MapPin,
 } from 'lucide-react';
+import { dayOffset, dayOffsetLabel, displayTime } from '../utils/flightTimes';
 
 interface FlightDetailsProps {
   flight: Flight;
 }
 
 export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
-  const formatDateTime = (isoString?: string | null) => {
-    if (!isoString) return { time: '--:--', date: 'Not available' };
-    try {
-      const d = new Date(isoString);
-      return {
-        time: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }),
-        date: d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
-      };
-    } catch {
-      return { time: '--:--', date: 'Not available' };
-    }
-  };
+  // Airport-local times, as on flight boards.
+  const depScheduled = displayTime(flight.departure.scheduledLocal, flight.departure.scheduledTime);
+  const depEstimated = displayTime(flight.departure.estimatedLocal, flight.departure.estimatedTime);
+  const depActual = displayTime(flight.departure.actualLocal, flight.departure.actualTime);
 
-  const depScheduled = formatDateTime(flight.departure.scheduledTime);
-  const depEstimated = formatDateTime(flight.departure.estimatedTime);
-  const depActual = formatDateTime(flight.departure.actualTime);
-
-  const arrScheduled = formatDateTime(flight.arrival.scheduledTime);
-  const arrEstimated = formatDateTime(flight.arrival.estimatedTime);
-  const arrActual = formatDateTime(flight.arrival.actualTime);
+  const arrScheduled = displayTime(flight.arrival.scheduledLocal, flight.arrival.scheduledTime);
+  const arrEstimated = displayTime(flight.arrival.estimatedLocal, flight.arrival.estimatedTime);
+  const arrActual = displayTime(flight.arrival.actualLocal, flight.arrival.actualTime);
+  // Arrival on a later calendar day than the (scheduled) departure: "+1 day".
+  const arrScheduledDays = dayOffsetLabel(dayOffset(depScheduled, arrScheduled));
+  const arrEstimatedDays = dayOffsetLabel(dayOffset(depScheduled, arrEstimated));
+  const arrActualDays = dayOffsetLabel(dayOffset(depScheduled, arrActual));
 
   return (
     <div className="bg-white border border-slate-200/90 rounded-2xl p-5 lg:p-7 shadow-sm space-y-6">
@@ -206,7 +200,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
               <span className="flex items-center gap-1.5 font-medium">
                 <Clock className="w-3.5 h-3.5 text-slate-400" /> Scheduled Time
               </span>
-              <span className="font-mono font-bold text-slate-800">{arrScheduled.time}</span>
+              <span className="font-mono font-bold text-slate-800">{arrScheduled.time}{arrScheduledDays && <span className="ml-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 align-middle" title="Arrives on a different calendar day (airport-local time)">{arrScheduledDays}</span>}</span>
             </div>
 
             {flight.arrival.estimatedTime && (
@@ -214,7 +208,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
                 <span className="flex items-center gap-1.5 font-medium">
                   <Clock className="w-3.5 h-3.5 text-sky-600" /> Estimated Time
                 </span>
-                <span className="font-mono font-bold text-sky-700">{arrEstimated.time}</span>
+                <span className="font-mono font-bold text-sky-700">{arrEstimated.time}{arrEstimatedDays && <span className="ml-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 align-middle" title="Arrives on a different calendar day (airport-local time)">{arrEstimatedDays}</span>}</span>
               </div>
             )}
 
@@ -223,7 +217,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
                 <span className="flex items-center gap-1.5 font-medium">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Actual Touchdown
                 </span>
-                <span className="font-mono font-bold text-emerald-700">{arrActual.time}</span>
+                <span className="font-mono font-bold text-emerald-700">{arrActual.time}{arrActualDays && <span className="ml-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 align-middle" title="Arrives on a different calendar day (airport-local time)">{arrActualDays}</span>}</span>
               </div>
             )}
 
@@ -251,7 +245,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
           <span className="text-slate-400 font-normal">Real-time ADS-B telemetry</span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
           {/* Aircraft Model / Registration */}
           <div className="space-y-1">
             <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
@@ -261,7 +255,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
               {flight.aircraft?.model || 'Not available'}
             </div>
             <div className="text-[11px] text-slate-500 font-mono">
-              {flight.aircraft?.registration ? `Reg: ${flight.aircraft.registration}` : flight.aircraft?.icao24 ? `Hex: ${flight.aircraft.icao24}` : 'Fleet standard'}
+              {flight.aircraft?.registration ? `Reg: ${flight.aircraft.registration}` : (flight.live?.icao24 || flight.aircraft?.icao24) ? `Hex: ${flight.live?.icao24 || flight.aircraft?.icao24}` : 'Registration not available'}
             </div>
           </div>
 
@@ -274,7 +268,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
               {flight.live?.altitude != null ? `${flight.live.altitude.toLocaleString()} ft` : 'Not available'}
             </div>
             <div className="text-[11px] text-slate-500">
-              {flight.live?.isGround ? 'On Runway / Ground' : flight.live?.altitude ? 'Airborne' : 'Telemetry pending'}
+              {flight.live ? (flight.live.isGround === true ? 'On the ground' : flight.live.isGround === false ? 'Airborne' : 'Ground state not reported') : 'No live data'}
             </div>
           </div>
 
@@ -287,7 +281,7 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
               {flight.live?.speed != null ? `${flight.live.speed} km/h` : 'Not available'}
             </div>
             <div className="text-[11px] text-slate-500 font-mono">
-              {flight.live?.speed != null ? `~${Math.round(flight.live.speed * 0.5399)} kts` : 'Radar lock'}
+              {flight.live?.speed != null ? `~${Math.round(flight.live.speed * 0.5399)} kts` : 'No live data'}
             </div>
           </div>
 
@@ -300,7 +294,24 @@ export const FlightDetails: React.FC<FlightDetailsProps> = ({ flight }) => {
               {flight.live?.heading != null ? `${flight.live.heading}°` : 'Not available'}
             </div>
             <div className="text-[11px] text-slate-500">
-              {flight.live?.heading != null ? `Bearing ${Math.round(flight.live.heading)}°` : 'Compass track'}
+              {flight.live?.heading != null ? `Bearing ${Math.round(flight.live.heading)}°` : 'No live data'}
+            </div>
+          </div>
+
+          {/* Live Position (same validated data as the map marker) */}
+          <div className="space-y-1">
+            <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+              <MapPin className="w-3 h-3 text-sky-600" /> Live Position
+            </div>
+            <div className="font-mono text-xs font-bold text-slate-900">
+              {flight.live ? `${flight.live.latitude.toFixed(4)}, ${flight.live.longitude.toFixed(4)}` : 'Not available'}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono">
+              {flight.live
+                ? [flight.live.callsign || flight.live.icao24, flight.live.updatedAt ? `updated ${new Date(flight.live.updatedAt).toLocaleTimeString()}` : null, flight.live.source === 'opensky' ? 'OpenSky' : flight.live.source === 'airlabs' ? 'AirLabs' : null]
+                    .filter(Boolean)
+                    .join(' · ')
+                : 'No live data'}
             </div>
           </div>
         </div>

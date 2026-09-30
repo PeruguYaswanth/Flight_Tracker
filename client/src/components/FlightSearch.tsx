@@ -1,14 +1,21 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { FlightSearchFilters } from '../types/flight';
 import { AirportAutocomplete } from './AirportAutocomplete';
 import { resolveToIata, formatAirportDisplay, findAmbiguousAirports, AIRPORT_DATABASE } from '../data/airportDatabase';
-import { Search, RotateCcw, Calendar, Building2, Hash, Sparkles, ArrowRightLeft } from 'lucide-react';
+import { AirportApiClient } from '../services/airportApi';
+import { Search, RotateCcw, Calendar, Building2, Hash, Sparkles, ArrowRightLeft, Clock } from 'lucide-react';
+import { DATE_RANGE_MESSAGE, isSearchableDate, localToday, searchDateRange } from '../utils/localDate';
+import { normalizeFlightNumber } from '../utils/flightNumber';
 
 interface FlightSearchProps {
   onSearch: (filters: FlightSearchFilters) => void;
   onReset: () => void;
   isLoading: boolean;
   initialFilters?: FlightSearchFilters | null;
+  /** Focus the date field on mount ("Search another date"). */
+  autoFocusDate?: boolean;
+  /** Focus the departure-time field on mount ("Try another time"). */
+  autoFocusTime?: boolean;
 }
 
 const SAMPLE_QUERIES = [
@@ -26,13 +33,18 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
   onReset,
   isLoading,
   initialFilters,
+  autoFocusDate = false,
+  autoFocusTime = false,
 }) => {
   const [mode, setMode] = useState<'flight' | 'route'>(initialFilters?.mode || 'flight');
   const [flightNumber, setFlightNumber] = useState(initialFilters?.flightNumber || '');
   const [airline, setAirline] = useState(initialFilters?.airline || '');
   const [flightDate, setFlightDate] = useState(
-    initialFilters?.flightDate || new Date().toISOString().split('T')[0]
+    initialFilters?.flightDate || localToday()
   );
+  // Optional airport-local departure time ("HH:MM"); empty = current window.
+  const [departureTime, setDepartureTime] = useState(initialFilters?.departureTime || '');
+  const [isResolving, setIsResolving] = useState(false);
 
   // Route search state: store user input / display value + resolved IATA code
   const [depDisplay, setDepDisplay] = useState(() => {
@@ -78,47 +90,87 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
     setValidationError(null);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  /**
+   * Airport for one route field. The local table answers instantly; anything
+   * it can't resolve (any other real airport, an airport name, an ICAO code)
+   * is asked of the backend, which uses the flight-data provider.
+   * Returns the IATA code, or an error message for the user.
+   */
+  const resolveField = async (display: string, knownIata: string, which: 'departure' | 'arrival'): Promise<{ iata: string } | { error: string }> => {
+    const text = display.trim();
+    if (knownIata) return { iata: knownIata.toUpperCase() };
+    if (!text) return { error: `Please enter the ${which} airport or city.` };
+
+    const ambiguous = findAmbiguousAirports(text);
+    if (ambiguous.length === 0) {
+      const local = resolveToIata(text);
+      if (local) return { iata: local };
+    }
+
+    const result = await AirportApiClient.resolveAirport(text);
+    switch (result.status) {
+      case 'FOUND':
+        // Schedules are indexed by IATA; an ICAO-only airfield has none to search.
+        return result.airport.iata
+          ? { iata: result.airport.iata }
+          : { error: `${result.airport.name || text} (${result.airport.icao}) has no IATA code, so scheduled flights can't be searched for it. It is listed in the Airports section.` };
+      case 'AMBIGUOUS': {
+        const codes = (ambiguous.length ? ambiguous.map((a) => a.iata) : result.airports.map((a) => a.iata || a.icao)).filter(Boolean).slice(0, 6);
+        return { error: `"${text}" matches several airports (${codes.join(', ')}). Please choose one from the list.` };
+      }
+      case 'NOT_FOUND':
+        return { error: `We couldn't resolve "${text}" as a valid airport code or airport name. Please check the airport name or IATA code.` };
+      default:
+        // Provider unreachable: a 3-character code can still be searched
+        // (the backend verifies it); a name can't be resolved right now.
+        return /^[A-Za-z0-9]{3}$/.test(text)
+          ? { iata: text.toUpperCase() }
+          : { error: 'Airport lookup is temporarily unavailable. Please enter the 3-letter airport code or try again.' };
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError(null);
+
+    // Typed dates bypass the picker's min/max, so check here too.
+    if (!isSearchableDate(flightDate)) {
+      setValidationError(DATE_RANGE_MESSAGE);
+      return;
+    }
 
     if (mode === 'flight') {
       if (!flightNumber.trim() && !airline.trim()) {
         setValidationError('Please enter a flight number (e.g. AI101, 6E502) or airline name.');
         return;
       }
+      // "6E 6372" / "6e-6372" -> "6E6372"; anything else is not sent.
+      const canonical = flightNumber.trim() ? normalizeFlightNumber(flightNumber) : '';
+      if (flightNumber.trim() && !canonical) {
+        setValidationError('Please enter a valid flight number, e.g. 6E6372, 6E 6372 or AI101.');
+        return;
+      }
 
       onSearch({
         mode: 'flight',
-        flightNumber: flightNumber.trim(),
+        flightNumber: canonical || '',
         airline: airline.trim(),
         flightDate,
+        departureTime: departureTime || undefined,
         depIata: '',
         arrIata: '',
       });
-    } else {
-      // Resolve IATA codes if user typed directly without selecting dropdown
-      const finalDepIata = (depIata || resolveToIata(depDisplay) || '').trim().toUpperCase();
-      const finalArrIata = (arrIata || resolveToIata(arrDisplay) || '').trim().toUpperCase();
+      return;
+    }
 
-      const ambiguous = [depIata ? '' : depDisplay, arrIata ? '' : arrDisplay]
-        .map((text) => ({ text: text.trim(), airports: findAmbiguousAirports(text) }))
-        .find((a) => a.airports.length > 0);
-      if (ambiguous) {
-        setValidationError(
-          `"${ambiguous.text}" matches several airports (${ambiguous.airports.map((a) => a.iata).join(', ')}). Please choose one from the list.`
-        );
-        return;
-      }
+    setIsResolving(true);
+    try {
+      const dep = await resolveField(depDisplay, depIata, 'departure');
+      if ('error' in dep) return setValidationError(dep.error);
+      const arr = await resolveField(arrDisplay, arrIata, 'arrival');
+      if ('error' in arr) return setValidationError(arr.error);
 
-      if (!finalDepIata || !finalArrIata) {
-        setValidationError(
-          'Please enter both departure and arrival airports or cities (e.g. Hyderabad, Delhi).'
-        );
-        return;
-      }
-
-      if (finalDepIata === finalArrIata) {
+      if (dep.iata === arr.iata) {
         setValidationError('Departure and arrival airports must be different.');
         return;
       }
@@ -128,11 +180,24 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
         flightNumber: '',
         airline: '',
         flightDate,
-        depIata: finalDepIata,
-        arrIata: finalArrIata,
+        departureTime: departureTime || undefined,
+        depIata: dep.iata,
+        arrIata: arr.iata,
       });
+    } finally {
+      setIsResolving(false);
     }
   };
+
+  // Recomputed every minute so the allowed range follows midnight.
+  const [dateRange, setDateRange] = useState(searchDateRange);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const next = searchDateRange();
+      setDateRange((prev) => (prev.min === next.min ? prev : next));
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const handleReset = () => {
     setFlightNumber('');
@@ -141,7 +206,7 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
     setDepIata('');
     setArrDisplay('');
     setArrIata('');
-    setFlightDate(new Date().toISOString().split('T')[0]);
+    setFlightDate(localToday());
     setValidationError(null);
     onReset();
   };
@@ -155,6 +220,10 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
     setArrDisplay(sample.arrDisplay);
     setArrIata(sample.arrIata);
     setValidationError(null);
+    if (!isSearchableDate(flightDate)) {
+      setValidationError(DATE_RANGE_MESSAGE);
+      return;
+    }
 
     onSearch({
       mode: sample.mode,
@@ -288,13 +357,52 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
           </label>
           <input
             type="date"
+            autoFocus={autoFocusDate}
             value={flightDate}
+            min={dateRange.min}
+            max={dateRange.max}
             onChange={(e) => setFlightDate(e.target.value)}
+            onInvalid={(e) => {
+              // Out-of-range typed date: show our message instead of the browser's.
+              e.preventDefault();
+              setValidationError(DATE_RANGE_MESSAGE);
+            }}
             aria-describedby="flight-date-hint"
             className="w-full bg-white border border-slate-300 hover:border-slate-400 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm font-medium text-slate-900 focus:outline-none transition shadow-sm"
           />
           <p id="flight-date-hint" className="text-[11px] text-slate-500">
-            Live schedules cover flights in the air now and departing in the coming hours.
+            Today through the next 7 days. Leave the time empty to see every flight that day.
+          </p>
+        </div>
+
+        {/* Optional departure time */}
+        <div className="space-y-1.5">
+          <label htmlFor="flight-departure-time" className="text-xs font-semibold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 text-sky-600" />
+            Departure Time <span className="normal-case font-medium text-slate-400">(optional)</span>
+          </label>
+          <div className="flex gap-2">
+            <input
+              id="flight-departure-time"
+              type="time"
+              autoFocus={autoFocusTime}
+              value={departureTime}
+              onChange={(e) => setDepartureTime(e.target.value)}
+              aria-describedby="flight-time-hint"
+              className="flex-1 bg-white border border-slate-300 hover:border-slate-400 focus:border-sky-600 focus:ring-2 focus:ring-sky-100 rounded-xl px-3.5 py-2.5 text-sm font-medium text-slate-900 focus:outline-none transition shadow-sm"
+            />
+            {departureTime && (
+              <button
+                type="button"
+                onClick={() => setDepartureTime('')}
+                className="px-3 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <p id="flight-time-hint" className="text-[11px] text-slate-500">
+            Shows departures from this local time over the following 3 hours.
           </p>
         </div>
 
@@ -309,7 +417,7 @@ export const FlightSearch: React.FC<FlightSearchProps> = ({
         <div className="flex items-center gap-3 pt-2">
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || isResolving}
             className="flex-1 bg-sky-600 hover:bg-sky-700 active:bg-sky-800 text-white font-semibold py-3 px-5 rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed text-sm"
           >
             {isLoading ? (

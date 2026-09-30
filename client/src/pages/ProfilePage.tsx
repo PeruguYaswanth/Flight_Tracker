@@ -6,6 +6,7 @@ import { FlightStatusBadge } from '../components/FlightStatusBadge';
 import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
 import { formatDisplayName, formatEmail, getInitials } from '../utils/formatUser';
+import { flightDetailsPath } from '../utils/flightLinks';
 
 export const ProfilePage: React.FC = () => {
   const { user, logout } = useAuth();
@@ -163,7 +164,7 @@ export const ProfilePage: React.FC = () => {
                   </div>
                   <div className="flex gap-2 sm:shrink-0">
                     <Link
-                      to={`/flight/${encodeURIComponent(t.flightNumber)}`}
+                      to={flightDetailsPath(t.flightNumber, { date: t.flightDate, dep: t.origin, arr: t.destination })}
                       className="flex-1 sm:flex-none text-center px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1"
                     >
                       View Flight

@@ -4,6 +4,20 @@ import { Flight } from '../types/flight';
 import { MapControls } from './MapControls';
 import { Radio, AlertCircle } from 'lucide-react';
 
+/**
+ * Leaflet popups, tooltips and div icons take HTML strings. Every value from
+ * the flight-data providers goes through this so it renders as text and can
+ * never inject markup or script.
+ */
+function esc(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 interface FlightMapProps {
   selectedFlight: Flight | null;
   /** Why no live position is available, when the backend said so. */
@@ -87,10 +101,11 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       return;
     }
 
-    L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png', {
-      maxZoom: 20,
-      subdomains: ['a', 'b', 'c'],
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles by <a href="https://www.cyclosm.org">CyclOSM</a>',
+    // Esri World Street Map: English place labels worldwide. CyclOSM renders
+    // each place's local-language name and has no language option.
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      attribution: 'Tiles &copy; <a href="https://www.esri.com">Esri</a> &mdash; Sources: Esri, HERE, Garmin, USGS, NGA, EPA, USDA, NPS, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(map);
 
     const layerGroup = L.layerGroup().addTo(map);
@@ -141,7 +156,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
         className: 'custom-dep-pin',
         html: `
           <div style="background: #0284c7; border: 2.5px solid #ffffff; color: #ffffff; border-radius: 9999px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; font-family: monospace; box-shadow: 0 4px 12px rgba(2,132,199,0.5);">
-            ${departure.iata || 'DEP'}
+            ${esc(departure.iata || 'DEP')}
           </div>
         `,
         iconSize: [36, 36],
@@ -151,10 +166,10 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       const depMarker = L.marker(depLatLng, { icon: depIcon });
       depMarker.bindPopup(`
         <div style="font-family: sans-serif; font-size: 12px;">
-          <div style="color: #38bdf8; font-weight: 800; font-size: 13px; margin-bottom: 2px;">ORIGIN: ${departure.iata}</div>
-          <div style="font-weight: 600; color: #ffffff;">${departure.name}</div>
-          <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${departure.city || ''}${departure.country ? ', ' + departure.country : ''}</div>
-          ${departure.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${departure.terminal} ${departure.gate ? `| Gate: ${departure.gate}` : ''}</div>` : ''}
+          <div style="color: #38bdf8; font-weight: 800; font-size: 13px; margin-bottom: 2px;">ORIGIN: ${esc(departure.iata)}</div>
+          <div style="font-weight: 600; color: #ffffff;">${esc(departure.name)}</div>
+          <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${esc(departure.city || '')}${departure.country ? ', ' + esc(departure.country) : ''}</div>
+          ${departure.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${esc(departure.terminal)} ${departure.gate ? `| Gate: ${esc(departure.gate)}` : ''}</div>` : ''}
         </div>
       `);
       layerGroup.addLayer(depMarker);
@@ -168,7 +183,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
         className: 'custom-arr-pin',
         html: `
           <div style="background: #059669; border: 2.5px solid #ffffff; color: #ffffff; border-radius: 9999px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; font-family: monospace; box-shadow: 0 4px 12px rgba(5,150,105,0.5);">
-            ${arrival.iata || 'ARR'}
+            ${esc(arrival.iata || 'ARR')}
           </div>
         `,
         iconSize: [36, 36],
@@ -178,10 +193,10 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
       const arrMarker = L.marker(arrLatLng, { icon: arrIcon });
       arrMarker.bindPopup(`
         <div style="font-family: sans-serif; font-size: 12px;">
-          <div style="color: #34d399; font-weight: 800; font-size: 13px; margin-bottom: 2px;">DESTINATION: ${arrival.iata}</div>
-          <div style="font-weight: 600; color: #ffffff;">${arrival.name}</div>
-          <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${arrival.city || ''}${arrival.country ? ', ' + arrival.country : ''}</div>
-          ${arrival.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${arrival.terminal} ${arrival.gate ? `| Gate: ${arrival.gate}` : ''}</div>` : ''}
+          <div style="color: #34d399; font-weight: 800; font-size: 13px; margin-bottom: 2px;">DESTINATION: ${esc(arrival.iata)}</div>
+          <div style="font-weight: 600; color: #ffffff;">${esc(arrival.name)}</div>
+          <div style="color: #94a3b8; font-size: 11px; margin-top: 4px;">${esc(arrival.city || '')}${arrival.country ? ', ' + esc(arrival.country) : ''}</div>
+          ${arrival.terminal ? `<div style="color: #e2e8f0; font-size: 11px; margin-top: 3px;">Terminal: ${esc(arrival.terminal)} ${arrival.gate ? `| Gate: ${esc(arrival.gate)}` : ''}</div>` : ''}
         </div>
       `);
       layerGroup.addLayer(arrMarker);
@@ -237,13 +252,14 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
     }
 
     const planeLatLng = L.latLng(live.latitude, live.longitude);
-    const hasHeading = typeof live.heading === 'number' && Number.isFinite(live.heading);
+    const heading = Number(live.heading);
+    const hasHeading = live.heading !== null && live.heading !== undefined && Number.isFinite(heading);
 
     // The plane glyph is drawn nose-up-right (45deg), so it is turned by
     // heading - 45 to point along the real track. Without a reported
     // heading, a non-directional dot is shown rather than an assumed one.
     const glyph = hasHeading
-      ? `<div style="transform: rotate(${(live.heading as number) - 45}deg); transition: transform 0.5s ease-out; display: flex;">
+      ? `<div style="transform: rotate(${heading - 45}deg); transition: transform 0.5s ease-out; display: flex;">
             <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="#ffffff" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
             </svg>
@@ -253,7 +269,7 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
     const aircraftIcon = L.divIcon({
       className: 'custom-aircraft-marker',
       html: `
-        <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;" data-heading="${hasHeading ? live.heading : 'none'}">
+        <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;" data-heading="${hasHeading ? heading : 'none'}">
           <div style="position: absolute; width: 44px; height: 44px; border-radius: 9999px; background: rgba(56, 189, 248, 0.25); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
           <div style="width: 38px; height: 38px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 9999px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(56, 189, 248, 0.7);">
             ${glyph}
@@ -284,13 +300,13 @@ export const FlightMap: React.FC<FlightMapProps> = ({ selectedFlight, liveUnavai
     const tooltipHtml = `
       <div style="font-family: sans-serif; font-size: 12px; min-width: 170px;">
         <div style="font-weight: 800; color: #38bdf8; font-size: 13px; font-family: monospace; display: flex; align-items: center; gap: 4px;">
-          <span>&#9992;</span> ${selectedFlight?.flightNumber ?? ''}
+          <span>&#9992;</span> ${esc(selectedFlight?.flightNumber ?? '')}
         </div>
         <hr style="border: 0; border-top: 1px solid #334155; margin: 6px 0;" />
         <div style="display: grid; grid-template-columns: auto 1fr; column-gap: 10px; row-gap: 2px; font-size: 11px;">
-          ${rows.map(([k, v]) => `<span style="color: #94a3b8;">${k}:</span><b style="color: #f8fafc; font-family: monospace;">${v}</b>`).join('')}
+          ${rows.map(([k, v]) => `<span style="color: #94a3b8;">${esc(k)}:</span><b style="color: #f8fafc; font-family: monospace;">${esc(v)}</b>`).join('')}
         </div>
-        ${footer ? `<div style="color: #64748b; font-size: 10px; margin-top: 6px;">${footer}</div>` : ''}
+        ${footer ? `<div style="color: #64748b; font-size: 10px; margin-top: 6px;">${esc(footer)}</div>` : ''}
       </div>
     `;
 

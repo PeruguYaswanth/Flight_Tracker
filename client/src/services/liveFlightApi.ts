@@ -1,4 +1,5 @@
 import { API_BASE_URL } from './apiBase';
+import { fetchWithTimeout } from './http';
 
 export type LiveReason =
   | 'NO_IDENTIFIER'
@@ -20,7 +21,8 @@ export interface LiveFlightPosition {
   heading: number | null;
   altitude: number | null;
   speed: number | null;
-  isGround: boolean;
+  /** Provider's on-ground flag; null when not reported. */
+  isGround: boolean | null;
   updatedAt: string | null;
   source: string | null;
   icao24: string | null;
@@ -43,6 +45,7 @@ interface LiveFlightResponse {
       icao24: string;
       timestamp: string | null;
       source: 'opensky' | 'airlabs';
+      onGround?: boolean | null;
     } | null;
     liveUnavailableReason?: LiveReason;
     message?: string;
@@ -125,7 +128,7 @@ export class LiveFlightApiClient {
     let data: LiveFlightResponse | { success: false; error?: { code?: string } } | null;
     try {
       // no-store: a live position is never answered from the HTTP cache.
-      const response = await fetch(`${BASE_URL}/live-flights/${encodeURIComponent(flightNumber)}?${params.toString()}`, {
+      const response = await fetchWithTimeout(`${BASE_URL}/live-flights/${encodeURIComponent(flightNumber)}?${params.toString()}`, {
         signal,
         cache: 'no-store',
       });
@@ -160,7 +163,7 @@ export class LiveFlightApiClient {
         heading: pos.heading ?? null,
         altitude: pos.altitude ?? null,
         speed: pos.speed ?? null,
-        isGround: false,
+        isGround: typeof pos.onGround === 'boolean' ? pos.onGround : null,
         updatedAt: pos.timestamp ?? null,
         source: pos.source ?? null,
         icao24: pos.icao24 ?? null,

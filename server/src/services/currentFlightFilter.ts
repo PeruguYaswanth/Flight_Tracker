@@ -102,12 +102,28 @@ export function collapseCodeshares(flights: Flight[]): Flight[] {
 
   const result: Flight[] = [];
   const emitted = new Set<Flight>();
+  // Codeshares whose operating record is not in the list (e.g. the provider
+  // truncated it) are still one physical flight: shown once, as the first
+  // marketing record, with the other numbers listed as codeshares.
+  const orphanGroups = new Map<string, Flight>();
   for (const f of flights) {
     const op = f.operatingFlightIata
       ? operating.get(keyOf(f.operatingFlightIata, f))
       : operating.get(keyOf(f.flightIata || f.flightNumber, f));
     if (f.operatingFlightIata && op) {
       op.codeshares!.push(f.flightNumber);
+      continue;
+    }
+    if (f.operatingFlightIata && !op) {
+      const key = keyOf(f.operatingFlightIata, f);
+      const group = orphanGroups.get(key);
+      if (group) {
+        group.codeshares!.push(f.flightNumber);
+        continue;
+      }
+      const first = { ...f, codeshares: [] };
+      orphanGroups.set(key, first);
+      result.push(first);
       continue;
     }
     const out = op ?? f;

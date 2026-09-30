@@ -6,16 +6,20 @@ import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorState } from '../components/ErrorState';
 import { FlightSearchFilters } from '../types/flight';
-import { FlightApiClient } from '../services/flightApi';
+import { FlightApiClient, FlightSearchError } from '../services/flightApi';
 import { Search, Radar } from 'lucide-react';
+import { resultsPath } from '../utils/searchUrl';
 
 export const FlightStatusPage: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const incomingFilters = (location.state as { filters?: FlightSearchFilters } | null)?.filters;
+  const incomingState = location.state as { filters?: FlightSearchFilters; prefillOnly?: boolean; focusDate?: boolean; focusTime?: boolean } | null;
+  const incomingFilters = incomingState?.filters;
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Rejected input (4xx) vs. the service being unavailable (5xx / network).
+  const [errorTitle, setErrorTitle] = useState<string | undefined>(undefined);
   const [lastFilters, setLastFilters] = useState<FlightSearchFilters | null>(null);
 
   const handleSearch = async (filters: FlightSearchFilters) => {
@@ -24,10 +28,21 @@ export const FlightStatusPage: React.FC = () => {
     setLastFilters(filters);
 
     try {
-      const results = await FlightApiClient.searchFlights(filters);
-      navigate('/flight-results', { state: { flights: results, filters } });
+      const { flights, meta } = await FlightApiClient.searchFlights(filters);
+      navigate(resultsPath(filters), { state: { flights, filters, meta } });
     } catch (err: any) {
-      setErrorMessage(err.message || 'Unable to retrieve flight information. Please try again later.');
+      const status = err instanceof FlightSearchError ? err.status : 0;
+      if (status >= 400 && status < 500 && status !== 429) {
+        setErrorTitle('Search could not be completed');
+        setErrorMessage(err.message);
+      } else if (status === 429) {
+        setErrorTitle('Too many searches');
+        setErrorMessage(err.message || 'Flight-data request limit reached. Please try again shortly.');
+      } else {
+        // Never presented as "no flights" - the data simply couldn't be fetched.
+        setErrorTitle('Unable to retrieve flight information');
+        setErrorMessage(err instanceof FlightSearchError && err.code === 'TIMEOUT' ? err.message : 'The flight-data service could not be reached. Please try again.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -39,7 +54,7 @@ export const FlightStatusPage: React.FC = () => {
   };
 
   useEffect(() => {
-    if (incomingFilters) {
+    if (incomingFilters && !incomingState?.prefillOnly) {
       handleSearch(incomingFilters);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -76,6 +91,8 @@ export const FlightStatusPage: React.FC = () => {
               onReset={handleReset}
               isLoading={isLoading}
               initialFilters={incomingFilters}
+              autoFocusDate={Boolean(incomingState?.focusDate)}
+              autoFocusTime={Boolean(incomingState?.focusTime)}
             />
           </div>
         </div>
@@ -87,6 +104,7 @@ export const FlightStatusPage: React.FC = () => {
 
         {!isLoading && errorMessage && (
           <ErrorState
+            title={errorTitle}
             message={errorMessage}
             onRetry={lastFilters ? () => handleSearch(lastFilters) : undefined}
           />

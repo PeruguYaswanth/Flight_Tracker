@@ -38,6 +38,8 @@ export const AIRLINES: AirlineReference[] = [
   { name: 'Japan Airlines', iata: 'JL', icao: 'JAL' },
   { name: 'Korean Air', iata: 'KE', icao: 'KAL' },
   { name: 'China Southern Airlines', iata: 'CZ', icao: 'CSN' },
+  { name: 'Akasa Air', iata: 'QP', icao: 'AKJ' },
+  { name: 'JetBlue', iata: 'B6', icao: 'JBU' },
 ];
 
 const byIata = new Map(AIRLINES.map((a) => [a.iata.toUpperCase(), a]));
@@ -66,14 +68,20 @@ export function resolveAirlineIataFromSearchTerm(term: string): string | null {
   const trimmed = term.trim();
   if (!trimmed) return null;
 
-  // Already looks like an IATA code (2 letters, optionally + 1 digit).
-  if (/^[A-Za-z0-9]{2,3}$/.test(trimmed) && byIata.has(trimmed.toUpperCase())) {
-    return trimmed.toUpperCase();
-  }
+  const upper = trimmed.toUpperCase();
+  // An IATA airline designator (2 characters, may include one digit: 6E,
+  // G8) is used as given - the provider knows far more airlines than this
+  // table and validates the code itself.
+  if (/^([A-Z]{2}|[A-Z]\d|\d[A-Z])$/.test(upper)) return upper;
+  // An ICAO designator of a known airline (IGO -> 6E).
+  if (/^[A-Z]{3}$/.test(upper) && byIcao.has(upper)) return byIcao.get(upper)!.iata;
 
   const exact = byNameLower.get(trimmed.toLowerCase());
   if (exact) return exact.iata;
 
-  const partial = AIRLINES.find((a) => a.name.toLowerCase().includes(trimmed.toLowerCase()));
-  return partial ? partial.iata : null;
+  // A name prefix that points to exactly one airline ("Indi" -> IndiGo);
+  // an ambiguous one ("Air") is not guessed.
+  const lower = trimmed.toLowerCase();
+  const prefixed = AIRLINES.filter((a) => a.name.toLowerCase().split(/[\s()]+/).some((w) => w.startsWith(lower)) || a.name.toLowerCase().startsWith(lower));
+  return prefixed.length === 1 ? prefixed[0].iata : null;
 }

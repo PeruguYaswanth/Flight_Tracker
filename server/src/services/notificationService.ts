@@ -4,6 +4,7 @@ import { Flight } from '../types/flight';
 import { FlightNotification, TrackedFlight } from '../types/notification';
 import { flightService } from './flightService';
 import { buildSnapshot, detectFlightEvents, FINAL_STATUSES, FlightLabel } from './notificationEvents';
+import { parseFlightNumber } from '../utils/flightNumber';
 
 export interface TrackFlightInput {
   flightNumber: string;
@@ -18,8 +19,17 @@ export type PublicNotification = Omit<FlightNotification, 'userId'>;
 /** Looks flights up by number. Defaults to the existing cached AirLabs search. */
 export type FlightLookup = (flightNumber: string, flightDate: string) => Promise<Flight[]>;
 
-const defaultLookup: FlightLookup = (flightNumber, flightDate) =>
-  flightService.searchFlights({ flightNumber, flightDate });
+const defaultLookup: FlightLookup = async (flightNumber, flightDate) => {
+  const live = await flightService.searchFlights({ flightNumber, flightDate });
+  if (live.some((f) => f.flightDate === flightDate)) return live;
+  // Not in the real-time window (e.g. a flight later this week): that
+  // date's timetable instance, so future flights can be tracked too.
+  const parsed = parseFlightNumber(flightNumber);
+  if (!parsed) return live;
+  const filter = parsed.kind === 'IATA' ? { flight_iata: parsed.canonical } : { flight_icao: parsed.canonical };
+  const { flights } = await flightService.timetableFlightsOn(filter, flightDate);
+  return [...live, ...flights];
+};
 
 // A tracked flight the provider no longer returns stops being checked this
 // long after its scheduled arrival (or departure, if arrival is unknown).

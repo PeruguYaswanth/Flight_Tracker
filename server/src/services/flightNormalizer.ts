@@ -1,6 +1,8 @@
 import { Flight, FlightStatus, AirportInfo, LivePosition, AircraftInfo, AirlineInfo } from '../types/flight';
 import { getAirportCoords } from './airportsData';
 import { getAirlineByCode } from './airlinesData';
+import { airportTimeZone } from './airportTimezones';
+import { formatZonedLocal, isValidCalendarDate, zonedLocalToUtcMs } from '../utils/dateTime';
 
 /**
  * Rejects missing/NaN coordinates and the (0, 0) "null island" sentinel some
@@ -45,6 +47,23 @@ function toIsoUtc(raw?: string | null): string | null {
  */
 export class FlightNormalizer {
   /**
+   * A flight's date is its scheduled departure date at the departure
+   * airport (a 02:15 IST departure on the 30th is a flight of the 30th,
+   * although it is still the 29th in UTC). AirLabs gives the local time
+   * directly; without it the UTC time is converted with the airport's zone.
+   */
+  public static departureLocalDate(item: any): string {
+    const local = String(item.dep_time || '').slice(0, 10);
+    if (isValidCalendarDate(local)) return local;
+    const utcIso = toIsoUtc(item.dep_time_utc) || toIsoUtc(item.dep_estimated_utc) || toIsoUtc(item.dep_actual_utc);
+    if (utcIso) {
+      const zone = airportTimeZone(item.dep_iata);
+      return zone ? formatZonedLocal(Date.parse(utcIso), zone).slice(0, 10) : utcIso.slice(0, 10);
+    }
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  /**
    * Normalizes an AirLabs `/schedules` item (real-time flight schedule
    * lookup - the actual live search/details provider for this app).
    */
@@ -57,8 +76,7 @@ export class FlightNormalizer {
       (item.flight_number ? `${item.airline_iata || item.airline_icao || ''}${item.flight_number}` : null) ||
       'UNKNOWN';
 
-    const depTimeUtc = item.dep_time_utc || item.dep_estimated_utc || item.dep_actual_utc || item.dep_time || null;
-    const flightDate = depTimeUtc ? String(depTimeUtc).slice(0, 10) : new Date().toISOString().split('T')[0];
+    const flightDate = FlightNormalizer.departureLocalDate(item);
 
     const status = this.normalizeStatus(item.status);
 
@@ -76,6 +94,9 @@ export class FlightNormalizer {
       scheduledTime: toIsoUtc(item.dep_time_utc) || toIsoUtc(item.dep_time),
       estimatedTime: toIsoUtc(item.dep_estimated_utc) || toIsoUtc(item.dep_estimated),
       actualTime: toIsoUtc(item.dep_actual_utc) || toIsoUtc(item.dep_actual),
+      scheduledLocal: item.dep_time || null,
+      estimatedLocal: item.dep_estimated || null,
+      actualLocal: item.dep_actual || null,
       delayMinutes: typeof item.dep_delayed === 'number' ? item.dep_delayed : (typeof item.delayed === 'number' ? item.delayed : null),
       latitude: depCoords?.lat ?? null,
       longitude: depCoords?.lng ?? null,
@@ -95,6 +116,9 @@ export class FlightNormalizer {
       scheduledTime: toIsoUtc(item.arr_time_utc) || toIsoUtc(item.arr_time),
       estimatedTime: toIsoUtc(item.arr_estimated_utc) || toIsoUtc(item.arr_estimated),
       actualTime: toIsoUtc(item.arr_actual_utc) || toIsoUtc(item.arr_actual),
+      scheduledLocal: item.arr_time || null,
+      estimatedLocal: item.arr_estimated || null,
+      actualLocal: item.arr_actual || null,
       delayMinutes: typeof item.arr_delayed === 'number' ? item.arr_delayed : null,
       latitude: arrCoords?.lat ?? null,
       longitude: arrCoords?.lng ?? null,
@@ -146,6 +170,126 @@ export class FlightNormalizer {
       lastUpdated: new Date().toISOString(),
       hasLiveTracking,
       route,
+      dataSource: 'schedule',
+    };
+  }
+
+  /**
+   * Normalizes an AirLabs `/routes` timetable record into a Flight on
+   * `localDate` (the departure airport's calendar date, "YYYY-MM-DD").
+   * Times come straight from the timetable: the local departure time on that
+   * date, and the UTC instant derived from the provider's own local/UTC time
+   * pair. Status is only "scheduled" when departure is still ahead; for a
+   * past departure the timetable can't say what happened, so it is
+   * "unknown" rather than guessed.
+   */
+  public static normalizeAirLabsRoute(item: any, localDate: string, now: Date = new Date()): Flight | null {
+    const toMin = (t?: string | null) => {
+      const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+      return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+    };
+    // Provider local-minus-UTC offset in minutes, e.g. IST 09:00 vs 03:30 -> +330.
+    const offsetOf = (local: number | null, utc: number | null) => {
+      if (local === null || utc === null) return null;
+      let off = local - utc;
+      if (off > 14 * 60) off -= 1440;
+      if (off < -12 * 60) off += 1440;
+      return off;
+    };
+    const depLocal = toMin(item.dep_time);
+    const depOffset = offsetOf(depLocal, toMin(item.dep_time_utc));
+    const depZone = airportTimeZone(item.dep_iata);
+    const arrZone = airportTimeZone(item.arr_iata);
+    if (depLocal === null || (depOffset === null && !depZone) || !isValidCalendarDate(localDate)) return null;
+
+    // The airport's zone gives that date's offset (DST-aware); the provider's
+    // local/UTC pair reflects the offset in force when the timetable was read.
+    const hhmm = `${String(Math.floor(depLocal / 60)).padStart(2, '0')}:${String(depLocal % 60).padStart(2, '0')}`;
+    const depUtcMs = depZone
+      ? zonedLocalToUtcMs(localDate, hhmm, depZone)
+      : Date.parse(`${localDate}T00:00:00Z`) + (depLocal - (depOffset as number)) * 60_000;
+    const arrLocal = toMin(item.arr_time);
+    const arrOffset = offsetOf(arrLocal, toMin(item.arr_time_utc));
+    const duration = typeof item.duration === 'number' ? item.duration : null;
+    // Arrival instant: departure + scheduled duration; else the next
+    // occurrence of the arrival UTC time after departure.
+    let arrUtcMs: number | null = null;
+    if (duration !== null) arrUtcMs = depUtcMs + duration * 60_000;
+    else if (toMin(item.arr_time_utc) !== null) {
+      const arrUtcMin = toMin(item.arr_time_utc) as number;
+      arrUtcMs = Math.floor(depUtcMs / 86_400_000) * 86_400_000 + arrUtcMin * 60_000;
+      if (arrUtcMs <= depUtcMs) arrUtcMs += 86_400_000;
+    }
+    const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+    const localStamp = (ms: number | null, offset: number | null, zone: string | null) =>
+      ms === null ? null : zone ? formatZonedLocal(ms, zone) : offset === null ? null : new Date(ms + offset * 60_000).toISOString().slice(0, 16).replace('T', ' ');
+
+    const flightIata: string | null = item.flight_iata || null;
+    const flightIcao: string | null = item.flight_icao || null;
+    const flightNumber = flightIata || flightIcao || `${item.airline_iata || ''}${item.flight_number || ''}`;
+    if (!flightNumber) return null;
+
+    const depIata = item.dep_iata || '';
+    const arrIata = item.arr_iata || '';
+    const depCoords = getAirportCoords(depIata);
+    const arrCoords = getAirportCoords(arrIata);
+    const firstTerminal = (t: any) => (Array.isArray(t) && t.length ? String(t[0]) : null);
+    const departure: AirportInfo = {
+      iata: depIata,
+      icao: item.dep_icao || null,
+      name: depCoords ? depCoords.name : depIata,
+      city: depCoords?.city || null,
+      country: depCoords?.country || null,
+      terminal: firstTerminal(item.dep_terminals),
+      gate: null,
+      baggage: null,
+      scheduledTime: iso(depUtcMs),
+      estimatedTime: null,
+      actualTime: null,
+      scheduledLocal: localStamp(depUtcMs, depOffset, depZone),
+      estimatedLocal: null,
+      delayMinutes: null,
+      latitude: depCoords?.lat ?? null,
+      longitude: depCoords?.lng ?? null,
+    };
+    const arrival: AirportInfo = {
+      iata: arrIata,
+      icao: item.arr_icao || null,
+      name: arrCoords ? arrCoords.name : arrIata,
+      city: arrCoords?.city || null,
+      country: arrCoords?.country || null,
+      terminal: firstTerminal(item.arr_terminals),
+      gate: null,
+      baggage: null,
+      scheduledTime: iso(arrUtcMs),
+      estimatedTime: null,
+      actualTime: null,
+      scheduledLocal: localStamp(arrUtcMs, arrOffset, arrZone),
+      estimatedLocal: null,
+      delayMinutes: null,
+      latitude: arrCoords?.lat ?? null,
+      longitude: arrCoords?.lng ?? null,
+    };
+    const airlineRef = getAirlineByCode(item.airline_iata, item.airline_icao);
+    const flightDate = localDate;
+
+    return {
+      id: `${flightNumber}-${flightDate}-${depIata}-${arrIata}`.replace(/\s+/g, ''),
+      flightNumber,
+      flightIata,
+      flightIcao,
+      operatingFlightIata: item.cs_flight_iata || null,
+      airline: { name: airlineRef?.name || item.airline_iata || item.airline_icao || 'Unknown Airline', iata: item.airline_iata || null, icao: item.airline_icao || null },
+      flightDate,
+      status: depUtcMs > now.getTime() ? 'scheduled' : 'unknown',
+      departure,
+      arrival,
+      aircraft: item.aircraft_icao ? { model: item.aircraft_icao, registration: null, iataCode: null, icaoCode: item.aircraft_icao, icao24: null } : null,
+      live: null,
+      lastUpdated: new Date().toISOString(),
+      hasLiveTracking: false,
+      route: this.generateRoutePoints(departure, arrival, null),
+      dataSource: 'timetable',
     };
   }
 

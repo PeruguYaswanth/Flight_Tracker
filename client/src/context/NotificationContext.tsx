@@ -4,6 +4,7 @@ import { useAuth } from './AuthContext';
 import { Flight } from '../types/flight';
 import { FlightNotification, TrackedFlight } from '../types/notification';
 import { NotificationApiClient } from '../services/notificationApi';
+import { flightPathFromKey } from '../utils/flightLinks';
 
 // Matches the existing 60s details/live-position cadence without adding
 // to it: the server only re-checks a tracked flight every ~2 min, through
@@ -57,7 +58,7 @@ function currentPermission(): DesktopPermission {
 }
 
 export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token } = useAuth();
+  const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
   const [notifications, setNotifications] = useState<FlightNotification[]>([]);
@@ -82,7 +83,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
         const popup = new Notification(`${n.flightNumber} · ${n.title}`, { body: n.message, tag: n.id });
         popup.onclick = () => {
           window.focus();
-          navigate(`/flight/${encodeURIComponent(n.flightNumber)}`);
+          navigate(flightPathFromKey(n.flightNumber, n.flightKey));
           popup.close();
         };
       } catch {
@@ -93,14 +94,14 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   }, [navigate]);
 
   const load = useCallback(async (showSpinner: boolean) => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     if (showSpinner) setIsLoading(true);
     lastLoadRef.current = Date.now();
     // Settled independently: a failing notifications endpoint must not hide
     // which flights are tracked (and vice versa).
     const [payloadResult, trackedResult] = await Promise.allSettled([
-      NotificationApiClient.getNotifications(token),
-      NotificationApiClient.getTrackedFlights(token),
+      NotificationApiClient.getNotifications(),
+      NotificationApiClient.getTrackedFlights(),
     ]);
 
     if (payloadResult.status === 'fulfilled') {
@@ -119,14 +120,14 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     const failure = [payloadResult, trackedResult].find((r): r is PromiseRejectedResult => r.status === 'rejected');
     setError(failure ? (failure.reason?.status === 401 ? 'Your session has expired. Please sign in again.' : UPDATE_ERROR) : null);
     if (showSpinner) setIsLoading(false);
-  }, [token, showDesktop]);
+  }, [isAuthenticated, showDesktop]);
 
   useEffect(() => {
     setNotifications([]);
     setTrackedFlights([]);
     setError(null);
     seenIdsRef.current = null;
-    if (!token) return;
+    if (!isAuthenticated) return;
 
     load(true);
     const interval = window.setInterval(() => {
@@ -140,45 +141,45 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [token, load]);
+  }, [isAuthenticated, load]);
 
   const refresh = useCallback(() => load(true), [load]);
 
   const markRead = useCallback(async (id: string) => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     const before = notifications;
     setNotifications((list) => list.map((n) => (n.id === id ? { ...n, read: true } : n)));
     try {
-      await NotificationApiClient.markRead(token, id);
+      await NotificationApiClient.markRead(id);
     } catch {
       setNotifications(before);
       setError(UPDATE_ERROR);
     }
-  }, [token, notifications]);
+  }, [isAuthenticated, notifications]);
 
   const markAllRead = useCallback(async () => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     const before = notifications;
     setNotifications((list) => list.map((n) => ({ ...n, read: true })));
     try {
-      await NotificationApiClient.markAllRead(token);
+      await NotificationApiClient.markAllRead();
     } catch {
       setNotifications(before);
       setError(UPDATE_ERROR);
     }
-  }, [token, notifications]);
+  }, [isAuthenticated, notifications]);
 
   const removeNotification = useCallback(async (id: string) => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     const before = notifications;
     setNotifications((list) => list.filter((n) => n.id !== id));
     try {
-      await NotificationApiClient.deleteNotification(token, id);
+      await NotificationApiClient.deleteNotification(id);
     } catch {
       setNotifications(before);
       setError(UPDATE_ERROR);
     }
-  }, [token, notifications]);
+  }, [isAuthenticated, notifications]);
 
   const getTrackedFor = useCallback(
     (flight: Flight) => trackedFlights.find((t) => t.flightKey === flight.id),
@@ -187,21 +188,21 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   // Track/untrack errors are thrown to the caller, which shows them inline.
   const trackFlight = useCallback(async (flight: Flight) => {
-    if (!token) throw new Error('Please sign in to track flights.');
-    const tracked = await NotificationApiClient.trackFlight(token, {
+    if (!isAuthenticated) throw new Error('Please sign in to track flights.');
+    const tracked = await NotificationApiClient.trackFlight({
       flightNumber: flight.flightNumber,
       flightDate: flight.flightDate,
       depIata: flight.departure.iata,
       arrIata: flight.arrival.iata,
     });
     setTrackedFlights((list) => (list.some((t) => t.id === tracked.id) ? list : [...list, tracked]));
-  }, [token]);
+  }, [isAuthenticated]);
 
   const untrackFlight = useCallback(async (trackedId: string) => {
-    if (!token) return;
-    await NotificationApiClient.untrackFlight(token, trackedId);
+    if (!isAuthenticated) return;
+    await NotificationApiClient.untrackFlight(trackedId);
     setTrackedFlights((list) => list.filter((t) => t.id !== trackedId));
-  }, [token]);
+  }, [isAuthenticated]);
 
   // Permission is only ever requested from this explicit user action, and
   // only while the browser still says "default" - never on page load and

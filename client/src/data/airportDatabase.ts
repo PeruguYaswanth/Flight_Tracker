@@ -35,7 +35,7 @@ export const AIRPORT_DATABASE: AirportRecord[] = [
   { iata: 'PAT', icao: 'VEPT', name: 'Jay Prakash Narayan Airport', city: 'Patna', country: 'India', aliases: ['Bihar'], lat: 25.5913, lng: 85.0880 },
   { iata: 'IDR', icao: 'VAID', name: 'Devi Ahilyabai Holkar Airport', city: 'Indore', country: 'India', aliases: ['Madhya Pradesh'], lat: 22.7217, lng: 75.8011 },
   { iata: 'NAG', icao: 'VANP', name: 'Dr. Babasaheb Ambedkar International Airport', city: 'Nagpur', country: 'India', aliases: ['Sonegaon', 'Maharashtra', 'Vidarbha'], lat: 21.0922, lng: 79.0472 },
-  { iata: 'VTZ', icao: 'VOVZ', name: 'Visakhapatnam International Airport', city: 'Visakhapatnam', country: 'India', aliases: ['Vizag', 'Andhra Pradesh'], lat: 17.7212, lng: 83.2245 },
+  { iata: 'VTZ', icao: 'VEVZ', name: 'Visakhapatnam International Airport', city: 'Visakhapatnam', country: 'India', aliases: ['Vizag', 'Andhra Pradesh'], lat: 17.7212, lng: 83.2245 },
   { iata: 'IXE', icao: 'VOML', name: 'Mangalore International Airport', city: 'Mangalore', country: 'India', aliases: ['Mangaluru', 'Bajpe', 'Karnataka'], lat: 12.9613, lng: 74.8901 },
   { iata: 'CJB', icao: 'VOCB', name: 'Coimbatore International Airport', city: 'Coimbatore', country: 'India', aliases: ['Peelamedu', 'Kovai', 'Tamil Nadu'], lat: 11.0299, lng: 77.0434 },
   { iata: 'TRZ', icao: 'VOTR', name: 'Tiruchirappalli International Airport', city: 'Tiruchirappalli', country: 'India', aliases: ['Trichy', 'Tamil Nadu'], lat: 10.7654, lng: 78.7097 },
@@ -298,43 +298,64 @@ function scoreAirports(rawQuery: string): Array<{ airport: AirportRecord; score:
  */
 export function findAmbiguousAirports(input?: string | null): AirportRecord[] {
   const clean = (input || '').trim();
-  if (!clean || /\(([A-Za-z]{3})\)/.test(clean) || /^[A-Za-z]{3}$/.test(clean)) return [];
+  if (!clean || /\(([A-Za-z0-9]{3})\)/.test(clean)) return [];
+  const lower = clean.toLowerCase();
+  // Airports whose city (or a well-known alternative name) is exactly the text.
+  const named = AIRPORT_DATABASE.filter(
+    (a) => a.city.toLowerCase() === lower || (a.aliases || []).some((al) => al.toLowerCase() === lower)
+  );
+  if (/^[A-Za-z0-9]{3}$/.test(clean)) {
+    // "Goa" is both a city (GOI, GOX) and, as GOA, another airport's code.
+    const byCode = AIRPORT_DATABASE.find((a) => a.iata === clean.toUpperCase());
+    const others = named.filter((a) => a !== byCode);
+    if (byCode && others.length > 0) return [byCode, ...others];
+    return !byCode && others.length > 1 ? others : [];
+  }
+  // Several airports in exactly the typed city ("Dubai": DXB, DWC) are
+  // ambiguous here regardless of partial alias/name bonuses.
+  if (named.length > 1) return named;
   const scored = scoreAirports(clean);
   if (scored.length < 2 || scored[0].score !== scored[1].score) return [];
   return scored.filter((s) => s.score === scored[0].score).map((s) => s.airport);
 }
 
 /**
- * Resolves any airport code, city name, or formatted string to its 3-letter IATA code.
- * Example inputs: "HYD", "Hyderabad", "Hyderabad (HYD)", "Bangalore" -> returns "HYD", "BLR"
+ * Resolves typed text to an IATA code from the local table, or null when the
+ * table can't decide (unknown text, several matches) - the caller then asks
+ * the backend. A 3-letter string is only a code if it is a known airport
+ * code and no place of that name exists; anything else is verified remotely.
+ * Examples: "HYD", "hyd", "Hyderabad", "Hyderabad (HYD)" -> "HYD"; "Madras" -> "MAA".
  */
+// City/alias/name prefix or better (see scoreAirports).
+const STRONG_MATCH_SCORE = 300;
+
 export function resolveToIata(input?: string | null): string | null {
   if (!input) return null;
   const clean = input.trim();
 
-  // 1. If it contains (XXX) pattern e.g. "Hyderabad (HYD)"
-  const bracketMatch = clean.match(/\(([A-Za-z]{3})\)/);
+  // 1. A picked suggestion, e.g. "Hyderabad (HYD)"
+  const bracketMatch = clean.match(/\(([A-Za-z0-9]{3})\)\s*$/);
   if (bracketMatch) {
     return bracketMatch[1].toUpperCase();
   }
 
-  // 2. If it's already a 3-letter IATA code in database
-  if (/^[A-Za-z]{3}$/.test(clean)) {
-    const upper = clean.toUpperCase();
-    const match = AIRPORT_DATABASE.find((a) => a.iata === upper);
-    if (match) return match.iata;
-    return upper; // treat direct 3-letter input as potential IATA
-  }
-
-  // 3. Search database for city/alias/name match - unless several airports
-  // match equally well, in which case the user has to pick one.
   if (findAmbiguousAirports(clean).length > 0) return null;
-  const searchResults = searchAirports(clean, 1);
-  if (searchResults.length > 0) {
-    return searchResults[0].iata;
+
+  // 2. A known 3-letter code that is not also a place name
+  if (/^[A-Za-z0-9]{3}$/.test(clean)) {
+    const lower = clean.toLowerCase();
+    const byCode = AIRPORT_DATABASE.find((a) => a.iata === clean.toUpperCase());
+    const isPlaceName = AIRPORT_DATABASE.some(
+      (a) => a !== byCode && (a.city.toLowerCase() === lower || (a.aliases || []).some((al) => al.toLowerCase() === lower))
+    );
+    return byCode && !isPlaceName ? byCode.iata : null;
   }
 
-  return null;
+  // 3. City / alternative name / airport name match - only a strong one
+  // (exact or prefix). A word merely contained in some airport's name
+  // ("Baku" in "Kushok Bakula Rimpochee") is left to the backend.
+  const best = scoreAirports(clean)[0];
+  return best && best.score >= STRONG_MATCH_SCORE ? best.airport.iata : null;
 }
 
 /**

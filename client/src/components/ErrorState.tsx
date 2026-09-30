@@ -3,11 +3,13 @@ import { AlertCircle, RefreshCw } from 'lucide-react';
 
 interface ErrorStateProps {
   message: string;
+  title?: string;
   onRetry?: () => void;
 }
 
 export const ErrorState: React.FC<ErrorStateProps> = ({
   message,
+  title = 'Unable to Complete Request',
   onRetry,
 }) => {
   return (
@@ -16,7 +18,7 @@ export const ErrorState: React.FC<ErrorStateProps> = ({
         <AlertCircle className="w-6 h-6" />
       </div>
       <div className="space-y-1">
-        <h3 className="text-sm font-bold text-rose-900">Unable to Complete Request</h3>
+        <h3 className="text-sm font-bold text-rose-900">{title}</h3>
         <p className="text-xs text-rose-700 max-w-sm font-medium leading-relaxed">
           {message}
         </p>

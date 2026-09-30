@@ -1,6 +1,7 @@
 import { ApiResponse } from '../types/flight';
 import { FlightNotification, TrackedFlight } from '../types/notification';
 import { API_BASE_URL } from './apiBase';
+import { fetchWithTimeout } from './http';
 
 const BASE_URL = API_BASE_URL;
 
@@ -16,15 +17,12 @@ export interface TrackFlightRequest {
   arrIata: string;
 }
 
-async function request<T>(token: string, path: string, init: RequestInit = {}, fallbackMessage: string): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, fallbackMessage: string): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${BASE_URL}${path}`, {
+    response = await fetchWithTimeout(`${BASE_URL}${path}`, {
       ...init,
-      headers: {
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-        Authorization: `Bearer ${token}`,
-      },
+      headers: init.body ? { 'Content-Type': 'application/json' } : undefined,
     });
   } catch {
     throw new Error(fallbackMessage);
@@ -47,31 +45,31 @@ async function request<T>(token: string, path: string, init: RequestInit = {}, f
 }
 
 export class NotificationApiClient {
-  public static getNotifications(token: string): Promise<NotificationsPayload> {
-    return request(token, '/notifications', {}, 'Unable to update notifications. Please try again.');
+  public static getNotifications(): Promise<NotificationsPayload> {
+    return request('/notifications', {}, 'Unable to update notifications. Please try again.');
   }
 
-  public static markRead(token: string, id: string): Promise<void> {
-    return request(token, `/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' }, 'Unable to update notification.');
+  public static markRead(id: string): Promise<void> {
+    return request(`/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' }, 'Unable to update notification.');
   }
 
-  public static markAllRead(token: string): Promise<void> {
-    return request(token, '/notifications/read-all', { method: 'PATCH' }, 'Unable to update notifications.');
+  public static markAllRead(): Promise<void> {
+    return request('/notifications/read-all', { method: 'PATCH' }, 'Unable to update notifications.');
   }
 
-  public static deleteNotification(token: string, id: string): Promise<void> {
-    return request(token, `/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Unable to clear notification.');
+  public static deleteNotification(id: string): Promise<void> {
+    return request(`/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Unable to clear notification.');
   }
 
-  public static getTrackedFlights(token: string): Promise<TrackedFlight[]> {
-    return request(token, '/tracked-flights', {}, 'Unable to load tracked flights.');
+  public static getTrackedFlights(): Promise<TrackedFlight[]> {
+    return request('/tracked-flights', {}, 'Unable to load tracked flights.');
   }
 
-  public static trackFlight(token: string, body: TrackFlightRequest): Promise<TrackedFlight> {
-    return request(token, '/tracked-flights', { method: 'POST', body: JSON.stringify(body) }, 'Unable to track this flight. Please try again.');
+  public static trackFlight(body: TrackFlightRequest): Promise<TrackedFlight> {
+    return request('/tracked-flights', { method: 'POST', body: JSON.stringify(body) }, 'Unable to track this flight. Please try again.');
   }
 
-  public static untrackFlight(token: string, id: string): Promise<void> {
-    return request(token, `/tracked-flights/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Unable to stop tracking. Please try again.');
+  public static untrackFlight(id: string): Promise<void> {
+    return request(`/tracked-flights/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Unable to stop tracking. Please try again.');
   }
 }

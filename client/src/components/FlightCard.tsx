@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Flight } from '../types/flight';
 import { FlightStatusBadge } from './FlightStatusBadge';
 import { Plane, ArrowRight, AlertCircle, Navigation, ChevronRight } from 'lucide-react';
+import { flightPath } from '../utils/flightLinks';
+import { dayOffset, dayOffsetLabel, displayTime } from '../utils/flightTimes';
 
 interface FlightCardProps {
   flight: Flight;
@@ -17,30 +19,24 @@ export const FlightCard: React.FC<FlightCardProps> = ({
 }) => {
   const navigate = useNavigate();
 
-  const formatTime = (isoString?: string | null) => {
-    if (!isoString) return '--:--';
-    try {
-      const date = new Date(isoString);
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-    } catch {
-      return '--:--';
-    }
-  };
-
-  const depTime = flight.departure.actualTime || flight.departure.estimatedTime || flight.departure.scheduledTime;
-  const arrTime = flight.arrival.actualTime || flight.arrival.estimatedTime || flight.arrival.scheduledTime;
+  // Airport-local times (actual, else estimated, else scheduled), as on flight boards.
+  const dep = flight.departure;
+  const arr = flight.arrival;
+  const depShown = dep.actualTime ? displayTime(dep.actualLocal, dep.actualTime) : dep.estimatedTime ? displayTime(dep.estimatedLocal, dep.estimatedTime) : displayTime(dep.scheduledLocal, dep.scheduledTime);
+  const arrShown = arr.actualTime ? displayTime(arr.actualLocal, arr.actualTime) : arr.estimatedTime ? displayTime(arr.estimatedLocal, arr.estimatedTime) : displayTime(arr.scheduledLocal, arr.scheduledTime);
+  const arrDays = dayOffsetLabel(dayOffset(depShown, arrShown));
 
   const handleClick = () => {
     if (onSelect) {
       onSelect(flight);
     } else {
-      navigate(`/flight/${encodeURIComponent(flight.flightNumber)}`, { state: { flight } });
+      navigate(flightPath(flight), { state: { flight } });
     }
   };
 
   const handleViewDetails = (e: React.MouseEvent) => {
     e.stopPropagation();
-    navigate(`/flight/${encodeURIComponent(flight.flightNumber)}`, { state: { flight } });
+    navigate(flightPath(flight), { state: { flight } });
   };
 
   return (
@@ -95,7 +91,7 @@ export const FlightCard: React.FC<FlightCardProps> = ({
               {flight.departure.iata || '---'}
             </span>
             <span className="text-sm font-semibold text-sky-700 font-mono">
-              {formatTime(depTime)}
+              {depShown.time}
             </span>
           </div>
           <div className="text-xs font-medium text-slate-800 truncate">
@@ -126,7 +122,7 @@ export const FlightCard: React.FC<FlightCardProps> = ({
         <div className="col-span-3 text-right space-y-1">
           <div className="flex items-baseline justify-end gap-2">
             <span className="text-sm font-semibold text-emerald-700 font-mono">
-              {formatTime(arrTime)}
+              {arrShown.time}{arrDays && <span className="ml-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 align-middle" title="Arrives on a different calendar day (airport-local time)">{arrDays}</span>}
             </span>
             <span className="text-2xl font-black font-mono tracking-tight text-slate-900">
               {flight.arrival.iata || '---'}
@@ -152,7 +148,11 @@ export const FlightCard: React.FC<FlightCardProps> = ({
             </span>
           </div>
 
-          {flight.departure.delayMinutes && flight.departure.delayMinutes > 0 ? (
+          {flight.dataSource === 'timetable' ? (
+            <span className="text-slate-500 font-medium" title="Planned times from the airline timetable. Live status appears once the flight enters the real-time schedule.">
+              Timetable · no live status yet
+            </span>
+          ) : flight.departure.delayMinutes && flight.departure.delayMinutes > 0 ? (
             <span className="text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-semibold flex items-center gap-1">
               <AlertCircle className="w-3 h-3" />
               Delayed +{flight.departure.delayMinutes}m
@@ -164,7 +164,7 @@ export const FlightCard: React.FC<FlightCardProps> = ({
 
         <div className="flex items-center gap-3">
           <span className="text-[11px] font-mono text-slate-400">
-            {flight.flightDate}
+            {flight.departure.scheduledLocal?.slice(0, 10) || flight.flightDate}
           </span>
           <button
             onClick={handleViewDetails}
